@@ -72,12 +72,13 @@ def systemd_units(cmd: list[str], every: int, watch: list[Path], env: dict[str, 
     env_lines = "".join(f"Environment={_systemd_quote(f'{k}={v}')}\n" for k, v in env.items())
     service = (
         "[Unit]\n"
-        "Description=Copy Claude Code instructions (CLAUDE.md) into AGENTS.md for Codex\n\n"
+        "Description=Keep CLAUDE.md and AGENTS.md in step (claude-md-for-codex)\n\n"
         "[Service]\n"
         "Type=oneshot\n"
         f"{env_lines}"
         f"ExecStart={exec_start}\n"
         "Nice=10\n"
+        "TimeoutStartSec=2h\n"
     )
     if every == 86400:
         when = "OnCalendar=daily\nPersistent=true\n"
@@ -96,7 +97,7 @@ def systemd_units(cmd: list[str], every: int, watch: list[Path], env: dict[str, 
     path_lines = "".join(f"PathChanged={p}\n" for p in watch)
     path_unit = (
         "[Unit]\n"
-        f"Description=Run {NAME} sync when Claude Code user instructions change\n\n"
+        f"Description=Run {NAME} sync when the global CLAUDE.md or AGENTS.md changes\n\n"
         "[Path]\n"
         f"{path_lines}"
         f"Unit={NAME}.service\n"

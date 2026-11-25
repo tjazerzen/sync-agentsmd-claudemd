@@ -1,39 +1,65 @@
 import contextlib
 import io
+import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
 from claude_md_for_codex import cli
-from claude_md_for_codex import render as r
 from claude_md_for_codex import sync as s
+from claude_md_for_codex.state import State
+
+FAKE_MERGER = """
+import os, sys, pathlib
+prompt = sys.stdin.read()
+log = pathlib.Path(os.environ["FAKE_MERGER_LOG"])
+log.write_text(log.read_text() + prompt + "\\n=====\\n" if log.exists() else prompt + "\\n=====\\n")
+mode = os.environ.get("FAKE_MERGER_MODE", "ok")
+if mode == "fail":
+    sys.exit(3)
+if mode == "bad":
+    print("I would rather not.")
+    sys.exit(0)
+print("DECISION: merged - kept both rules")
+print("CLAUDE_MD: " + os.environ.get("FAKE_CLAUDE_MD", "copy"))
+print("<<<MERGED")
+print(os.environ.get("FAKE_MERGED", "# Rules\\nmerged rule one\\nmerged rule two"))
+print("MERGED>>>")
+"""
 
 
 class Sandbox(unittest.TestCase):
-    """A fake home with ~/.claude, ~/.codex and a code folder; git ignores the real config."""
+    """A fake home with ~/.claude, ~/.codex and ~/code; git and the state dir are isolated."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        base = Path(self.tmp.name)
-        self.home = base / "home"
+        self.base = Path(self.tmp.name)
+        self.home = self.base / "home"
         self.code = self.home / "code"
         self.code.mkdir(parents=True)
         self.env = s.Env(self.home, self.home / ".claude", self.home / ".codex")
-        gitconfig = base / "gitconfig"
+        gitconfig = self.base / "gitconfig"
         gitconfig.write_text("[user]\n\tname = Test\n\temail = test@example.invalid\n[init]\n\tdefaultBranch = main\n")
+        script = self.base / "fake_merger.py"
+        script.write_text(FAKE_MERGER)
+        self.merger_log = self.base / "merger.log"
         patcher = mock.patch.dict(os.environ, {
             "HOME": str(self.home),
             "XDG_CONFIG_HOME": str(self.home / ".config"),
+            "XDG_STATE_HOME": str(self.home / ".local/state"),
             "GIT_CONFIG_GLOBAL": str(gitconfig),
             "GIT_CONFIG_NOSYSTEM": "1",
+            "FAKE_MERGER_LOG": str(self.merger_log),
         })
         patcher.start()
         self.addCleanup(patcher.stop)
-        for var in ("CODEX_HOME", "CLAUDE_CONFIG_DIR"):
+        for var in ("CODEX_HOME", "CLAUDE_CONFIG_DIR", "FAKE_MERGER_MODE", "FAKE_MERGED", "FAKE_CLAUDE_MD"):
             os.environ.pop(var, None)
+        self.merger = f"{sys.executable} {script}"
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -52,257 +78,357 @@ class Sandbox(unittest.TestCase):
         self.git(path, "init", "-q")
         return path
 
+    def commit(self, repo: Path, message: str) -> None:
+        self.git(repo, "add", "-A")
+        self.git(repo, "commit", "-qm", message)
+
     def run_cli(self, *argv: str) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = cli.main(list(argv))
         return code, out.getvalue(), err.getvalue()
 
+    def sync(self, *extra: str) -> tuple[int, str, str]:
+        return self.run_cli("sync", "--root", str(self.code), "--no-global", "--merger", self.merger, *extra)
 
-class GlobalTest(Sandbox):
-    def test_creates_then_is_idempotent(self):
-        self.write(self.env.claude_dir / "CLAUDE.md", "Be brief.\n@~/notes/style.md\n")
-        self.write(self.home / "notes/style.md", "Use metric units.")
-        t = s.plan_global(self.env)
-        self.assertEqual(t.action, "create")
-        s.apply(t)
-        text = (self.env.codex_home / "AGENTS.md").read_text()
-        self.assertIn("Be brief.", text)
-        self.assertIn("<!-- source: ~/notes/style.md (imported by ~/.claude/CLAUDE.md) -->", text)
-        self.assertEqual(s.plan_global(self.env).action, "ok")
+    def merges_run(self) -> int:
+        return self.merger_log.read_text().count("\n=====\n") if self.merger_log.exists() else 0
 
-    def test_update_and_remove(self):
-        src = self.write(self.env.claude_dir / "CLAUDE.md", "one")
-        s.apply(s.plan_global(self.env))
-        src.write_text("two")
-        t = s.plan_global(self.env)
-        self.assertEqual(t.action, "update")
-        s.apply(t)
-        src.unlink()
-        t = s.plan_global(self.env)
-        self.assertEqual(t.action, "remove")
-        s.apply(t)
-        self.assertFalse((self.env.codex_home / "AGENTS.md").exists())
-
-    def test_never_overwrites_hand_written_file(self):
-        self.write(self.env.claude_dir / "CLAUDE.md", "claude")
-        self.write(self.env.codex_home / "AGENTS.md", "my codex notes")
-        t = s.plan_global(self.env)
-        self.assertEqual(t.action, "blocked")
-        code, _, err = self.run_cli("sync")
-        self.assertEqual(code, 2)
-        self.assertIn("hand-written", err)
-        self.assertEqual((self.env.codex_home / "AGENTS.md").read_text(), "my codex notes")
-
-    def test_adopt_moves_hand_written_file_to_extra(self):
-        self.write(self.env.claude_dir / "CLAUDE.md", "claude text")
-        self.write(self.env.codex_home / "AGENTS.md", "codex only text")
-        code, _, _ = self.run_cli("sync", "--adopt")
-        self.assertEqual(code, 0)
-        text = (self.env.codex_home / "AGENTS.md").read_text()
-        self.assertIn("claude text", text)
-        self.assertIn("codex only text", text)
-        self.assertEqual((self.env.codex_home / "AGENTS.extra.md").read_text(), "codex only text")
-
-    def test_adopt_replaces_a_symlink(self):
-        self.write(self.env.claude_dir / "CLAUDE.md", "claude text\n@more.md")
-        self.write(self.env.claude_dir / "more.md", "imported")
-        self.env.codex_home.mkdir()
-        (self.env.codex_home / "AGENTS.md").symlink_to(self.env.claude_dir / "CLAUDE.md")
-        self.assertEqual(s.plan_global(self.env).action, "blocked")
-        self.assertEqual(self.run_cli("sync", "--adopt")[0], 0)
-        self.assertFalse((self.env.codex_home / "AGENTS.md").is_symlink())
-        self.assertIn("imported", (self.env.codex_home / "AGENTS.md").read_text())
-
-    def test_user_rules_and_override_warning(self):
-        self.write(self.env.claude_dir / "CLAUDE.md", "base")
-        self.write(self.env.claude_dir / "rules/py.md", "---\npaths: ['**/*.py']\n---\nType hints.")
-        self.write(self.env.codex_home / "AGENTS.override.md", "override")
-        t = s.plan_global(self.env)
-        self.assertIn("Type hints.", t.content)
-        self.assertIn("`**/*.py`", t.content)
-        self.assertTrue(any("AGENTS.override.md" in w for w in t.warnings))
-
-    def test_extra_file_survives_a_deleted_claude_md(self):
-        src = self.write(self.env.claude_dir / "CLAUDE.md", "claude")
-        self.write(self.env.codex_home / "AGENTS.extra.md", "codex only")
-        s.apply(s.plan_global(self.env))
-        src.unlink()
-        t = s.plan_global(self.env)
-        self.assertEqual(t.action, "update")
-        self.assertIn("codex only", t.content)
-        self.assertNotIn("claude", t.content.split("-->", 1)[1])
-
-    def test_nothing_to_do_without_claude_md(self):
-        self.assertEqual(s.plan_global(self.env).action, "skip")
+    def case(self, folder: Path) -> tuple[str, str]:
+        plan = s.build_plan(self.env, [self.code], State(), include_global=False)
+        [a] = [a for a in plan if a.pair.folder == folder]
+        return a.case, a.action
 
 
-class ProjectTest(Sandbox):
-    def test_generates_agents_md_and_excludes_it_from_git(self):
+class CopyTest(Sandbox):
+    def test_only_claude_md_is_copied_to_agents_md_and_kept_out_of_git(self):
         repo = self.repo("app")
-        self.write(repo / "CLAUDE.md", "Run `make test`.\n@docs/rules.md")
+        self.write(repo / "CLAUDE.md", "Run make test.\n")
+        self.commit(repo, "add CLAUDE.md")
+        self.assertEqual(self.case(repo), ("claude-only", "create-agents"))
+        self.assertEqual(self.sync()[0], 0)
+        self.assertEqual((repo / "AGENTS.md").read_text(), "Run make test.\n")
+        self.assertEqual(self.git(repo, "status", "--porcelain"), "")
+        self.assertEqual(self.case(repo), ("same", "none"))
+
+    def test_only_agents_md_is_copied_to_claude_md(self):
+        repo = self.repo("lib")
+        self.write(repo / "AGENTS.md", "Use tabs.\n")
+        self.sync()
+        self.assertEqual((repo / "CLAUDE.md").read_text(), "Use tabs.\n")
+        self.assertIn("/CLAUDE.md", (repo / ".git/info/exclude").read_text().splitlines())
+
+    def test_imports_are_inlined_for_codex(self):
+        repo = self.repo("imp")
+        self.write(repo / "CLAUDE.md", "Main\n@docs/rules.md\n")
         self.write(repo / "docs/rules.md", "No force pushes.")
-        self.write(repo / "CLAUDE.local.md", "My sandbox URL.")
-        plan = s.build_plan(self.env, [self.code], include_global=False)
-        [t] = plan.targets
-        self.assertEqual(t.action, "create")
-        s.apply(t)
-        text = (repo / "AGENTS.md").read_text()
-        self.assertIn("No force pushes.", text)
-        self.assertIn("My sandbox URL.", text)
-        self.assertIn("/AGENTS.md", (repo / ".git/info/exclude").read_text())
-        self.assertNotIn("AGENTS.md", self.git(repo, "status", "--porcelain"))
+        self.sync()
+        agents = (repo / "AGENTS.md").read_text()
+        self.assertIn("Main\n@docs/rules.md", agents)
+        self.assertIn("imported from docs/rules.md -->\nNo force pushes.", agents)
+        self.assertEqual(self.case(repo), ("same", "none"))
+        (repo / "docs/rules.md").write_text("Force pushes only to your own branches.")
+        self.assertEqual(self.case(repo), ("claude-changed", "update-agents"))
+        self.sync()
+        self.assertIn("only to your own branches", (repo / "AGENTS.md").read_text())
 
-    def test_nested_folder_exclude_uses_repo_relative_path(self):
-        repo = self.repo("mono")
-        self.write(repo / "packages/api/CLAUDE.md", "API rules")
-        for t in s.build_plan(self.env, [self.code], include_global=False).pending:
-            s.apply(t)
-        self.assertIn("/packages/api/AGENTS.md", (repo / ".git/info/exclude").read_text().splitlines())
-        self.assertEqual(self.git(repo, "status", "--porcelain", "--untracked-files=all").strip(),
-                         "?? packages/api/CLAUDE.md")
+    def test_after_a_sync_an_edit_on_either_side_is_copied_without_a_merge(self):
+        repo = self.repo("edits")
+        self.write(repo / "CLAUDE.md", "v1\n")
+        self.sync()
+        (repo / "CLAUDE.md").write_text("v2 from claude\n")
+        self.assertEqual(self.case(repo), ("claude-changed", "update-agents"))
+        self.sync()
+        self.assertEqual((repo / "AGENTS.md").read_text(), "v2 from claude\n")
+        (repo / "AGENTS.md").write_text("v3 from codex\n")
+        self.assertEqual(self.case(repo), ("agents-changed", "update-claude"))
+        self.sync()
+        self.assertEqual((repo / "CLAUDE.md").read_text(), "v3 from codex\n")
+        self.assertEqual(self.merges_run(), 0)
+        backups = list((self.home / ".local/state/claude-md-for-codex/backups").rglob("*.md"))
+        self.assertEqual(len(backups), 2)
 
-    def test_worktree_exclude_goes_to_the_shared_git_dir(self):
-        repo = self.repo("wt-main")
-        self.write(repo / "README", "x")
-        self.git(repo, "add", "README")
-        self.git(repo, "commit", "-qm", "init")
-        wt = self.code / "wt-branch"
-        self.git(repo, "worktree", "add", "-q", str(wt), "-b", "feature")
-        self.write(wt / "CLAUDE.md", "branch rules")
-        for t in s.build_plan(self.env, [wt], include_global=False).pending:
-            s.apply(t)
-        self.assertIn("/AGENTS.md", (repo / ".git/info/exclude").read_text())
-        self.assertNotIn("AGENTS.md", self.git(wt, "status", "--porcelain"))
+    def test_writes_go_through_symlinks(self):
+        repo = self.repo("linkedfile")
+        shared = self.write(self.base / "dotfiles/claude.md", "v1\n")
+        (repo / "CLAUDE.md").symlink_to(shared)
+        self.sync()
+        (repo / "AGENTS.md").write_text("v2\n")
+        self.sync()
+        self.assertTrue((repo / "CLAUDE.md").is_symlink())
+        self.assertEqual(shared.read_text(), "v2\n")
 
-    def test_symlinked_paths_still_get_a_repo_relative_exclude(self):
-        repo = self.repo("real")
-        self.write(repo / "sub/CLAUDE.md", "rules")
-        link = self.home / "link"
-        link.symlink_to(self.code)
-        for t in s.build_plan(self.env, [link], include_global=False).pending:
-            s.apply(t)
-        self.assertIn("/sub/AGENTS.md", (repo / ".git/info/exclude").read_text().splitlines())
-        self.assertEqual(self.git(repo, "status", "--porcelain", "--untracked-files=all").strip(),
-                         "?? sub/CLAUDE.md")
 
-    def test_home_reached_through_a_symlink_is_not_a_project(self):
-        self.write(self.env.claude_dir / "CLAUDE.md", "global")
-        link = Path(self.tmp.name) / "home-link"
-        link.symlink_to(self.home)
-        self.assertEqual(s.find_folders(link, 8, self.home), [])
-
-    def test_shared_source_is_left_alone(self):
+class InSyncTest(Sandbox):
+    def test_claude_md_importing_agents_md_is_in_sync(self):
         repo = self.repo("shared")
         self.write(repo / "AGENTS.md", "team rules")
         self.write(repo / "CLAUDE.md", "@AGENTS.md\n")
-        [t] = s.build_plan(self.env, [self.code], include_global=False).targets
-        self.assertEqual(t.action, "shared")
+        self.assertEqual(self.case(repo), ("shared", "none"))
 
-    def test_symlinked_claude_md_is_shared(self):
+    def test_symlinked_pair_is_in_sync(self):
         repo = self.repo("linked")
         self.write(repo / "AGENTS.md", "team rules")
         (repo / "CLAUDE.md").symlink_to("AGENTS.md")
-        [t] = s.build_plan(self.env, [self.code], include_global=False).targets
-        self.assertEqual(t.action, "shared")
+        self.assertEqual(self.case(repo), ("linked", "none"))
 
-    def test_drift_is_reported_not_fixed(self):
-        repo = self.repo("drift")
-        self.write(repo / "AGENTS.md", "team rules")
-        self.write(repo / "CLAUDE.md", "@AGENTS.md\nAlso: deploy on Fridays never.")
-        self.write(repo / "CLAUDE.local.md", "personal")
-        [t] = s.build_plan(self.env, [self.code], include_global=False).targets
-        self.assertEqual(t.action, "drift")
-        self.assertIn("CLAUDE.md", t.detail)
-        self.assertIn("CLAUDE.local.md", t.detail)
-        self.assertFalse(t.pending)
-        self.assertEqual((repo / "AGENTS.md").read_text(), "team rules")
+    def test_identical_files_are_in_sync(self):
+        repo = self.repo("same")
+        self.write(repo / "AGENTS.md", "rules\n")
+        self.write(repo / "CLAUDE.md", "rules\n\n")
+        self.assertEqual(self.case(repo), ("same", "none"))
 
-    def test_orphaned_generated_file_is_removed(self):
-        repo = self.repo("orphan")
-        src = self.write(repo / "CLAUDE.md", "rules")
-        for t in s.build_plan(self.env, [self.code], include_global=False).pending:
-            s.apply(t)
-        src.unlink()
-        [t] = s.build_plan(self.env, [self.code], include_global=False).targets
-        self.assertEqual(t.action, "remove")
-        s.apply(t)
+
+class MergeTest(Sandbox):
+    def test_never_synced_and_different_files_are_merged_using_git_history(self):
+        repo = self.repo("diverged")
+        self.write(repo / "CLAUDE.md", "# Rules\nclaude rule\n")
+        self.write(repo / "AGENTS.md", "# Rules\nagents rule\n")
+        self.commit(repo, "add both instruction files")
+        self.assertEqual(self.case(repo), ("unsynced", "merge"))
+        code, out, _ = self.sync()
+        self.assertEqual(code, 0, out)
+        self.assertIn("merged - kept both rules", out)
+        merged = "# Rules\nmerged rule one\nmerged rule two\n"
+        self.assertEqual((repo / "CLAUDE.md").read_text(), merged)
+        self.assertEqual((repo / "AGENTS.md").read_text(), merged)
+        prompt = self.merger_log.read_text()
+        self.assertIn("add both instruction files", prompt)
+        self.assertIn("claude rule", prompt)
+        self.assertIn("agents rule", prompt)
+        self.assertEqual(self.case(repo), ("same", "none"))
+        records = list((self.home / ".local/state/claude-md-for-codex/merges").glob("*.json"))
+        self.assertTrue(json.loads(records[0].read_text())["ok"])
+
+    def test_merger_can_make_claude_md_import_agents_md_like_the_default_branch(self):
+        origin = self.base / "origin.git"
+        self.git(self.base, "init", "-q", "--bare", str(origin))
+        repo = self.repo("stale")
+        self.write(repo / "AGENTS.md", "# Rules\nnew rule\n")
+        self.write(repo / "CLAUDE.md", "@AGENTS.md\n")
+        self.commit(repo, "CLAUDE.md imports AGENTS.md")
+        self.git(repo, "remote", "add", "origin", str(origin))
+        self.git(repo, "push", "-q", "origin", "main")
+        self.git(repo, "fetch", "-q", "origin")
+        self.git(repo, "checkout", "-q", "-b", "old", "HEAD")
+        self.write(repo / "CLAUDE.md", "# Rules\nold rule\n")
+        self.commit(repo, "old full CLAUDE.md")
+        self.git(repo, "reset", "-q", "--soft", "HEAD~1")
+        os.environ["FAKE_CLAUDE_MD"] = "import"
+        self.assertEqual(self.case(repo), ("unsynced", "merge"))
+        self.sync()
+        prompt = self.merger_log.read_text()
+        self.assertIn("on origin/main, CLAUDE.md is only the line `@AGENTS.md`", prompt)
+        self.assertIn("fully merged into origin/main", prompt)
+        self.assertEqual((repo / "CLAUDE.md").read_text(), "@AGENTS.md\n")
+        self.assertEqual((repo / "AGENTS.md").read_text(), "# Rules\nmerged rule one\nmerged rule two\n")
+        self.assertEqual(self.case(repo), ("shared", "none"))
+
+    def test_both_changed_since_the_last_sync_is_merged(self):
+        repo = self.repo("both")
+        self.write(repo / "CLAUDE.md", "# Rules\nbase\n")
+        self.sync()
+        (repo / "CLAUDE.md").write_text("# Rules\nbase\nclaude edit\n")
+        (repo / "AGENTS.md").write_text("# Rules\nbase\ncodex edit\n")
+        self.assertEqual(self.case(repo), ("both-changed", "merge"))
+
+    def test_claude_md_importing_agents_md_plus_extra_text(self):
+        repo = self.repo("stub")
+        self.write(repo / "AGENTS.md", "# Rules\nteam rule\n")
+        self.write(repo / "CLAUDE.md", "@AGENTS.md\nClaude-only extra rule\n")
+        self.assertEqual(self.case(repo), ("stub-extra", "merge"))
+        self.sync()
+        self.assertEqual((repo / "CLAUDE.md").read_text(), "@AGENTS.md\n")
+        self.assertEqual((repo / "AGENTS.md").read_text(), "# Rules\nmerged rule one\nmerged rule two\n")
+        self.assertIn("CLAUDE.md imports AGENTS.md", self.merger_log.read_text())
+
+    def test_edit_to_generated_agents_md_folds_back_into_claude_md_with_imports(self):
+        repo = self.repo("fold")
+        self.write(repo / "CLAUDE.md", "# Rules\nmain\n@docs/x.md\n")
+        self.write(repo / "docs/x.md", "imported rule")
+        self.sync()
+        (repo / "AGENTS.md").write_text((repo / "AGENTS.md").read_text() + "\ncodex added this\n")
+        self.assertEqual(self.case(repo), ("agents-changed", "merge"))
+        os.environ["FAKE_MERGED"] = "# Rules\nmain\ncodex added this\n@docs/x.md"
+        self.sync()
+        self.assertEqual((repo / "CLAUDE.md").read_text(), "# Rules\nmain\ncodex added this\n@docs/x.md\n")
+        self.assertIn("imported from docs/x.md -->\nimported rule", (repo / "AGENTS.md").read_text())
+        self.assertIn("Lines like `@path/to/file`", self.merger_log.read_text())
+
+    def test_identical_pairs_in_other_checkouts_reuse_the_merge(self):
+        for name in ("wt1", "wt2", "wt3"):
+            repo = self.repo(name)
+            self.write(repo / "CLAUDE.md", "# Rules\nold\n")
+            self.write(repo / "AGENTS.md", "# Rules\nnew\n")
+        code, out, _ = self.sync()
+        self.assertEqual(self.merges_run(), 1)
+        self.assertEqual(out.count("reused an earlier merge"), 2)
+
+    def test_failed_merge_changes_nothing_and_is_not_retried_today(self):
+        repo = self.repo("bad")
+        self.write(repo / "CLAUDE.md", "# Rules\nold claude\n")
+        self.write(repo / "AGENTS.md", "# Rules\nold agents\n")
+        os.environ["FAKE_MERGER_MODE"] = "bad"
+        code, _, err = self.sync()
+        self.assertEqual(code, 2)
+        self.assertIn("not in the expected format", err)
+        self.assertEqual((repo / "CLAUDE.md").read_text(), "# Rules\nold claude\n")
+        os.environ["FAKE_MERGER_MODE"] = "ok"
+        _, _, err = self.sync()
+        self.assertIn("failed within the last day", err)
+        self.assertEqual(self.merges_run(), 1)
+
+    def test_merge_budget_and_no_merge(self):
+        repo = self.repo("budget")
+        self.write(repo / "CLAUDE.md", "# Rules\na\n")
+        self.write(repo / "AGENTS.md", "# Rules\nb\n")
+        _, out, _ = self.sync("--no-merge")
+        self.assertIn("merge postponed", out)
+        self.assertEqual(self.merges_run(), 0)
+
+    def test_suspiciously_short_merge_is_rejected(self):
+        repo = self.repo("short")
+        self.write(repo / "CLAUDE.md", "# Rules\n" + "important rule\n" * 40)
+        self.write(repo / "AGENTS.md", "# Rules\n" + "other rule\n" * 40)
+        os.environ["FAKE_MERGED"] = "tiny"
+        code, _, err = self.sync()
+        self.assertEqual(code, 2)
+        self.assertIn("far shorter", err)
+
+
+class SafetyTest(Sandbox):
+    def test_conflict_markers_block_the_pair(self):
+        repo = self.repo("conflict")
+        self.write(repo / "CLAUDE.md", "a\n<<<<<<< HEAD\nx\n=======\ny\n>>>>>>> other\n")
+        self.write(repo / "AGENTS.md", "b")
+        self.assertEqual(self.case(repo), ("conflict", "blocked"))
+
+    def test_git_operation_in_progress_is_skipped(self):
+        repo = self.repo("rebasing")
+        self.write(repo / "CLAUDE.md", "rules")
+        (repo / ".git/MERGE_HEAD").write_text("0" * 40)
+        code, _, err = self.sync()
+        self.assertEqual(code, 2)
+        self.assertIn("git merge is in progress", err)
         self.assertFalse((repo / "AGENTS.md").exists())
 
     def test_project_imports_outside_the_repo_are_skipped(self):
         self.write(self.home / ".ssh/config", "Host secret")
         repo = self.repo("evil")
         self.write(repo / "CLAUDE.md", "rules\n@~/.ssh/config")
-        [t] = s.build_plan(self.env, [self.code], include_global=False).targets
-        self.assertNotIn("Host secret", t.content)
-        self.assertTrue(any("outside the project" in w for w in t.warnings))
-        [t] = s.build_plan(self.env, [self.code], include_global=False, allow_external=True).targets
-        self.assertIn("Host secret", t.content)
+        self.sync()
+        self.assertNotIn("Host secret", (repo / "AGENTS.md").read_text())
+
+    def test_legacy_generated_files_are_replaced_or_removed(self):
+        repo = self.repo("legacy")
+        self.write(repo / "CLAUDE.md", "rules\n")
+        self.write(repo / "AGENTS.md", "<!-- claude-md-for-codex:generated from CLAUDE.md -->\n\nold\n")
+        orphan = self.repo("orphan")
+        self.write(orphan / "AGENTS.md", "<!-- claude-md-for-codex:generated from CLAUDE.md -->\n\nold\n")
+        self.assertEqual(self.case(repo), ("legacy", "update-agents"))
+        self.sync()
+        self.assertEqual((repo / "AGENTS.md").read_text(), "rules\n")
+        self.assertFalse((orphan / "AGENTS.md").exists())
+
+    def test_symlinked_paths_still_get_a_repo_relative_exclude(self):
+        repo = self.repo("real")
+        self.write(repo / "sub/CLAUDE.md", "rules")
+        link = self.home / "link"
+        link.symlink_to(self.code)
+        self.run_cli("sync", "--root", str(link), "--no-global")
+        self.assertIn("/sub/AGENTS.md", (repo / ".git/info/exclude").read_text().splitlines())
+        self.assertEqual(self.git(repo, "status", "--porcelain", "--untracked-files=all").strip(), "?? sub/CLAUDE.md")
+
+    def test_worktree_exclude_goes_to_the_shared_git_dir(self):
+        repo = self.repo("wt-main")
+        self.write(repo / "README", "x")
+        self.commit(repo, "init")
+        wt = self.code / "wt-branch"
+        self.git(repo, "worktree", "add", "-q", str(wt), "-b", "feature")
+        self.write(wt / "CLAUDE.md", "branch rules")
+        self.run_cli("sync", "--root", str(wt), "--no-global")
+        self.assertIn("/AGENTS.md", (repo / ".git/info/exclude").read_text())
+        self.assertNotIn("AGENTS.md", self.git(wt, "status", "--porcelain"))
 
     def test_skips_dependencies_hidden_folders_and_home(self):
         repo = self.repo("deps")
         self.write(repo / "node_modules/pkg/CLAUDE.md", "dependency")
         self.write(repo / ".cache/CLAUDE.md", "hidden")
         self.write(self.env.claude_dir / "CLAUDE.md", "global")
-        folders = s.find_folders(self.home, 8, self.home)
-        self.assertEqual(folders, [])
+        self.assertEqual(s.find_folders(self.home, 8, self.home), [])
+        link = self.base / "home-link"
+        link.symlink_to(self.home)
+        self.assertEqual(s.find_folders(link, 8, self.home), [])
 
-    def test_size_warning(self):
-        repo = self.repo("big")
-        self.write(repo / "CLAUDE.md", "x" * 100)
-        [t] = s.build_plan(self.env, [self.code], include_global=False, max_bytes=50).targets
-        self.assertTrue(any("project_doc_max_bytes" in w for w in t.warnings))
+
+class GlobalTest(Sandbox):
+    def test_global_claude_md_is_copied_for_codex(self):
+        self.write(self.env.claude_dir / "CLAUDE.md", "Be brief.\n@~/notes/style.md\n")
+        self.write(self.home / "notes/style.md", "Use metric units.")
+        code, out, _ = self.run_cli("sync")
+        self.assertEqual(code, 0)
+        agents = (self.env.codex_home / "AGENTS.md").read_text()
+        self.assertIn("Be brief.", agents)
+        self.assertIn("imported from ~/notes/style.md -->\nUse metric units.", agents)
+
+    def test_global_agents_md_is_copied_for_claude(self):
+        self.write(self.env.codex_home / "AGENTS.md", "Codex rules\n")
+        self.run_cli("sync")
+        self.assertEqual((self.env.claude_dir / "CLAUDE.md").read_text(), "Codex rules\n")
+
+    def test_override_warning(self):
+        self.write(self.env.claude_dir / "CLAUDE.md", "x")
+        self.write(self.env.codex_home / "AGENTS.override.md", "override")
+        [a] = s.build_plan(self.env, [], State())
+        self.assertTrue(any("AGENTS.override.md" in w for w in a.warnings))
 
 
 class CliTest(Sandbox):
-    def test_status_and_sync_round_trip(self):
+    def test_status_exit_codes_and_json(self):
         repo = self.repo("cli")
         self.write(repo / "CLAUDE.md", "cli rules")
-        self.write(self.env.claude_dir / "CLAUDE.md", "global rules")
-        code, out, _ = self.run_cli("status", "--root", str(self.code))
+        code, out, _ = self.run_cli("status", "--root", str(self.code), "--no-global")
         self.assertEqual(code, 1)
-        self.assertIn("missing", out)
-        code, out, _ = self.run_cli("sync", "--dry-run", "--root", str(self.code))
+        self.assertIn("only CLAUDE.md -> copy CLAUDE.md -> AGENTS.md", out)
+        code, out, _ = self.run_cli("status", "--root", str(self.code), "--no-global", "--json")
+        self.assertEqual(json.loads(out)[0]["action"], "create-agents")
+        self.sync()
+        self.assertEqual(self.run_cli("status", "--root", str(self.code), "--no-global")[0], 0)
+
+    def test_dry_run_changes_nothing(self):
+        repo = self.repo("dry")
+        self.write(repo / "CLAUDE.md", "rules")
+        code, out, _ = self.sync("--dry-run")
         self.assertEqual(code, 1)
         self.assertFalse((repo / "AGENTS.md").exists())
-        code, out, _ = self.run_cli("sync", "--root", str(self.code))
-        self.assertEqual(code, 0)
-        self.assertIn("created ~/code/cli/AGENTS.md", out)
-        self.assertIn("created ~/.codex/AGENTS.md", out)
-        code, out, _ = self.run_cli("status", "--root", str(self.code))
-        self.assertEqual(code, 0, out)
 
-    def test_render_prints_without_writing(self):
-        self.write(self.env.claude_dir / "CLAUDE.md", "global rules")
-        code, out, _ = self.run_cli("render")
-        self.assertEqual(code, 0)
-        self.assertIn("global rules", out)
-        self.assertFalse((self.env.codex_home / "AGENTS.md").exists())
-
-    def test_roots_come_from_config(self):
+    def test_roots_and_merger_come_from_config(self):
         repo = self.repo("cfg")
-        self.write(repo / "CLAUDE.md", "cfg rules")
-        cli.save_config({"roots": [str(self.code)], "every": "1h"})
-        self.assertEqual(cli.load_config()["roots"], [str(self.code)])
-        self.run_cli("sync")
-        self.assertTrue(r.is_generated((repo / "AGENTS.md").read_text()))
+        self.write(repo / "CLAUDE.md", "# Rules\nx\n")
+        self.write(repo / "AGENTS.md", "# Rules\ny\n")
+        cli.save_config({"roots": [str(self.code)], "merger": self.merger, "max_merges": 1})
+        self.assertEqual(cli.load_config()["max_merges"], 1)
+        self.run_cli("sync", "--no-global")
+        self.assertEqual(self.merges_run(), 1)
 
     def test_codex_max_bytes_from_codex_config(self):
         self.write(self.env.codex_home / "config.toml", "project_doc_max_bytes = 65536\n")
         self.assertEqual(cli.codex_max_bytes(s.Env.from_os()), 65536)
 
-    def test_purge_removes_only_generated_files(self):
-        repo = self.repo("purge")
-        self.write(repo / "CLAUDE.md", "rules")
-        other = self.repo("handwritten")
-        self.write(other / "AGENTS.md", "keep me")
+    def test_purge_removes_only_unedited_created_files(self):
+        a = self.repo("purge-a")
+        self.write(a / "CLAUDE.md", "rules a")
+        b = self.repo("purge-b")
+        self.write(b / "AGENTS.md", "rules b")
         cli.save_config({"roots": [str(self.code)]})
-        self.run_cli("sync")
+        self.run_cli("sync", "--no-global")
+        (b / "CLAUDE.md").write_text("edited by hand")
         with mock.patch("claude_md_for_codex.schedule.uninstall", return_value=[]):
-            self.run_cli("uninstall", "--purge")
-        self.assertFalse((repo / "AGENTS.md").exists())
-        self.assertNotIn("/AGENTS.md", (repo / ".git/info/exclude").read_text())
-        self.assertEqual((other / "AGENTS.md").read_text(), "keep me")
+            _, out, _ = self.run_cli("uninstall", "--purge")
+        self.assertFalse((a / "AGENTS.md").exists())
+        self.assertNotIn("/AGENTS.md", (a / ".git/info/exclude").read_text())
+        self.assertTrue((b / "CLAUDE.md").exists())
+        self.assertIn("kept", out)
 
 
 if __name__ == "__main__":

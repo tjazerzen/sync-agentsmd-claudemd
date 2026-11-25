@@ -1,19 +1,18 @@
-"""Read Claude Code instruction files the way Claude Code does and render them for Codex.
+"""Read CLAUDE.md files the way Claude Code does.
 
-Claude Code follows `@path` imports, skips imports inside code, and strips block-level
-HTML comments. Codex does none of that: it reads AGENTS.md as plain text. This module
-collects a set of Claude Code files plus everything they import, and renders them as one
-Markdown document with a `<!-- source: ... -->` line before each file.
+Claude Code follows `@path` imports and skips imports inside code. Codex follows none of
+them: it reads AGENTS.md as plain text. `codex_view` turns a CLAUDE.md into the text Codex
+should get: the file itself, then every file it imports.
 """
 
 from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass, field
 from pathlib import Path
 
-GENERATED_TAG = "claude-md-for-codex:generated"
+LEGACY_TAG = "claude-md-for-codex:generated"  # header of files written by version 0.1
+IMPORT_BLOCK = "<!-- claude-md-for-codex: imported from "
 MAX_IMPORT_HOPS = 4  # "Imported files can recursively import other files, with a maximum depth of four hops."
 
 _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
@@ -22,12 +21,11 @@ _CODE_SPAN = re.compile(r"(`+)(?:(?!\1).)+?\1")
 # the path runs to the next unescaped whitespace, and `\ ` escapes a space.
 _IMPORT = re.compile(r"(?:^|(?<=\s))@((?:\\ |[^\s\\])+)")
 _TRAILING_PUNCTUATION = ".,;:!?)]}>'\""
-_FRONTMATTER = re.compile(r"\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|\Z)", re.S)
 
 
-def is_generated(text: str) -> bool:
-    """True when the text is a file this tool wrote: its first line is the generated header."""
-    return text.lstrip("\ufeff").startswith(f"<!-- {GENERATED_TAG}")
+def is_legacy_generated(text: str) -> bool:
+    """A file written by version 0.1, which always regenerated AGENTS.md from CLAUDE.md."""
+    return text.lstrip("﻿").startswith(f"<!-- {LEGACY_TAG}")
 
 
 def _fence_state(line: str, fence: str | None) -> tuple[bool, str | None]:
@@ -41,11 +39,7 @@ def _fence_state(line: str, fence: str | None) -> tuple[bool, str | None]:
 
 
 def strip_block_comments(text: str) -> str:
-    """Drop block-level HTML comments (whole-line `<!-- ... -->`) outside code blocks.
-
-    Claude Code strips these before it shows a file to the model; comments that share a
-    line with other text, and anything inside a fenced code block, are kept.
-    """
+    """Drop block-level HTML comments (whole-line `<!-- ... -->`) outside code blocks."""
     lines = text.split("\n")
     out: list[str] = []
     fence: str | None = None
@@ -115,31 +109,11 @@ def resolve_import(raw: str, base_dir: Path, home: Path) -> Path | None:
     return None
 
 
-def parse_rule_paths(text: str) -> tuple[list[str], str]:
-    """Split a `.claude/rules/*.md` file into (`paths:` globs, body without frontmatter)."""
-    m = _FRONTMATTER.match(text)
-    if not m:
-        return [], text
-    globs: list[str] = []
-    lines = m.group(1).splitlines()
-    for i, line in enumerate(lines):
-        key = re.match(r"^paths\s*:\s*(.*)$", line)
-        if not key:
-            continue
-        value = key.group(1).strip()
-        if value.startswith("["):
-            globs = [g.strip().strip("'\"") for g in value.strip("[]").split(",") if g.strip()]
-        elif value:
-            globs = [value.strip("'\"")]
-        else:
-            for item in lines[i + 1:]:
-                entry = re.match(r"^\s*-\s*(.+?)\s*$", item)
-                if entry:
-                    globs.append(entry.group(1).strip("'\""))
-                elif item.strip():
-                    break
-        break
-    return globs, text[m.end():]
+def _same(a: Path, b: Path) -> bool:
+    try:
+        return a.resolve() == b.resolve()
+    except OSError:
+        return False
 
 
 def residual_text(text: str, base_dir: Path, home: Path) -> str:
@@ -155,85 +129,13 @@ def residual_text(text: str, base_dir: Path, home: Path) -> str:
     return text.strip()
 
 
-@dataclass
-class Section:
-    path: Path
-    label: str
-    text: str
-    imported_by: str | None = None
-    note: str | None = None
-
-
-@dataclass
-class Collection:
-    """Files gathered from a set of entry points, in the order Claude Code shows them."""
-
-    home: Path
-    label_base: Path | None = None
-    allowed_root: Path | None = None  # imports outside it are skipped (project files)
-    sections: list[Section] = field(default_factory=list)
-    warnings: list[str] = field(default_factory=list)
-    _seen: set[Path] = field(default_factory=set)
-
-    def label(self, path: Path) -> str:
-        if self.label_base is not None:
-            try:
-                return path.relative_to(self.label_base).as_posix()
-            except ValueError:
-                pass
-        for home in (self.home, self.home.resolve()):
-            try:
-                return "~/" + path.relative_to(home).as_posix()
-            except ValueError:
-                continue
-        return str(path)
-
-    def add(self, path: Path, *, rule: bool = False, note: str | None = None) -> None:
-        self._visit(path, depth=0, imported_by=None, rule=rule, note=note)
-
-    def _visit(self, path: Path, depth: int, imported_by: str | None, rule: bool, note: str | None) -> None:
-        try:
-            real = path.resolve()
-        except OSError:
-            return
-        if real in self._seen:
-            return
-        try:
-            raw = path.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            self.warnings.append(f"skipped {self.label(path)}: not UTF-8 text")
-            return
-        except OSError as exc:
-            self.warnings.append(f"skipped {self.label(path)}: {exc.strerror or exc}")
-            return
-        if is_generated(raw):
-            return
-        self._seen.add(real)
-        if rule:
-            globs, raw = parse_rule_paths(raw)
-            if globs and note is None:
-                listed = ", ".join(f"`{g}`" for g in globs)
-                note = (f"(Claude Code applies these rules only to files matching {listed}. "
-                        "Follow them when you work on those files.)")
-        text = strip_block_comments(raw)
-        self.sections.append(Section(path, self.label(path), text, imported_by, note))
-        if depth >= MAX_IMPORT_HOPS:
-            if find_imports(text):
-                self.warnings.append(f"{self.label(path)}: imports deeper than {MAX_IMPORT_HOPS} hops were not followed")
-            return
-        for target_raw in find_imports(text):
-            target = resolve_import(target_raw, path.parent, self.home)
-            if target is None:
-                continue
-            if self.allowed_root is not None and not _inside(target, self.allowed_root):
-                self.warnings.append(
-                    f"{self.label(path)}: skipped @{target_raw} (outside the project; "
-                    "pass --allow-external-imports to include it)")
-                continue
-            self._visit(target, depth + 1, self.label(path), rule=False, note=None)
-
-    def has_content(self) -> bool:
-        return any(s.text.strip() for s in self.sections)
+def imports_file(text: str, base_dir: Path, home: Path, target: Path) -> str | None:
+    """The import token (e.g. `@AGENTS.md`) in text that points at target, if any."""
+    for raw in find_imports(text):
+        found = resolve_import(raw, base_dir, home)
+        if found is not None and _same(found, target):
+            return "@" + raw.replace(" ", "\\ ")
+    return None
 
 
 def _inside(path: Path, root: Path) -> bool:
@@ -244,18 +146,65 @@ def _inside(path: Path, root: Path) -> bool:
         return False
 
 
-def render(sections: list[Section], header: str) -> str:
-    """Render sections as one Markdown document that starts with the generated-file header."""
-    parts = [header]
-    for s in sections:
-        body = s.text.strip("\n")
-        if not body.strip():
-            continue
-        source = f"<!-- source: {s.label}" + (f" (imported by {s.imported_by})" if s.imported_by else "") + " -->"
-        parts.append(source + "\n" + (s.note + "\n\n" if s.note else "") + body)
-    return "\n\n".join(parts) + "\n"
+def _label(path: Path, base: Path, home: Path) -> str:
+    for b in (base, base.resolve()):
+        try:
+            return path.relative_to(b).as_posix()
+        except ValueError:
+            pass
+    for h in (home, home.resolve()):
+        try:
+            return "~/" + path.relative_to(h).as_posix()
+        except ValueError:
+            pass
+    return str(path)
 
 
-def header(sources: str, edit_hint: str) -> str:
-    return (f"<!-- {GENERATED_TAG} from {sources}. Do not edit this file: "
-            f"claude-md-for-codex overwrites it. {edit_hint} -->")
+def codex_view(claude_md: Path, text: str, home: Path, *, skip: Path | None = None,
+               allowed_root: Path | None = None) -> tuple[str, list[str]]:
+    """The text Codex should read for a CLAUDE.md: the file, then each file it imports.
+
+    Without imports this is the file unchanged, so AGENTS.md is a plain copy. Each imported
+    file is appended once (depth first, up to four hops) after an `imported from` line.
+    `skip` (the sibling AGENTS.md) is never inlined. With `allowed_root`, imports that leave
+    that folder are skipped with a warning, as Claude Code asks before following them.
+    Returns (text, warnings).
+    """
+    base = claude_md.parent
+    seen = {claude_md.resolve()}
+    if skip is not None:
+        seen.add(skip.resolve())
+    blocks: list[str] = []
+    warnings: list[str] = []
+
+    def visit(path: Path, body: str, depth: int) -> None:
+        targets = find_imports(body)
+        if depth >= MAX_IMPORT_HOPS:
+            if targets:
+                warnings.append(f"{_label(path, base, home)}: imports deeper than {MAX_IMPORT_HOPS} hops were not followed")
+            return
+        for raw in targets:
+            target = resolve_import(raw, path.parent, home)
+            if target is None:
+                continue
+            real = target.resolve()
+            if real in seen:
+                continue
+            if allowed_root is not None and not _inside(target, allowed_root):
+                warnings.append(f"{_label(path, base, home)}: skipped @{raw} (outside the project; "
+                                "pass --allow-external-imports to include it)")
+                continue
+            seen.add(real)
+            try:
+                content = target.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                warnings.append(f"skipped @{raw}: {exc}")
+                continue
+            by = "" if path == claude_md else f" (imported by {_label(path, base, home)})"
+            blocks.append(f"{IMPORT_BLOCK}{_label(target, base, home)}{by} -->\n{content.strip(chr(10))}\n")
+            visit(target, content, depth + 1)
+
+    visit(claude_md, text, 0)
+    if not blocks:
+        return text, warnings
+    return text.rstrip("\n") + "\n\n" + "\n".join(blocks), warnings

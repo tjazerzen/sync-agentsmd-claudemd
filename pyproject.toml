@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "claude-md-for-codex"
-version = "0.1.0"
-description = "Let OpenAI Codex read your Claude Code instructions: keeps AGENTS.md copies of CLAUDE.md files, with @imports resolved."
+version = "0.2.0"
+description = "Keep CLAUDE.md (Claude Code) and AGENTS.md (Codex) in step: copies whichever exists to the other and merges them with a coding agent when both changed."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]

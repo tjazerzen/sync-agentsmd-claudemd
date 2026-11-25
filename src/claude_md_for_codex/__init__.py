@@ -1,3 +1,3 @@
-"""Let OpenAI Codex read Claude Code instructions (CLAUDE.md) via generated AGENTS.md files."""
+"""Keep CLAUDE.md (Claude Code) and AGENTS.md (Codex) in step."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

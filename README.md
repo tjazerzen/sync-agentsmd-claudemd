@@ -1,181 +1,216 @@
 # claude-md-for-codex
 
-Let [OpenAI Codex](https://github.com/openai/codex) read the instructions you wrote for
-[Claude Code](https://code.claude.com).
+Keep `CLAUDE.md` ([Claude Code](https://code.claude.com)) and `AGENTS.md`
+([OpenAI Codex](https://github.com/openai/codex)) saying the same thing, in every project
+and in your global instructions.
 
-Claude Code reads `CLAUDE.md`. Codex reads `AGENTS.md`. Since v2.1.277, Claude Code
-reads `AGENTS.md` when there is no `CLAUDE.md` in the working folder or above it, so a
-setup that starts from AGENTS.md already works in both. The other direction does not work out of the box:
+The tool looks at each folder that has either file and does the obvious thing:
 
-- Codex never reads your personal `~/.claude/CLAUDE.md`.
-- Codex does not follow `@path` imports. It sees the literal text `@docs/rules.md`.
-- Codex ignores `CLAUDE.local.md`, `.claude/CLAUDE.md` and `.claude/rules/`.
-
-`claude-md-for-codex` writes AGENTS.md copies of those files on a schedule, and as soon
-as your global CLAUDE.md changes:
-
-| Claude Code reads | Codex gets |
+| What it finds | What it does |
 | --- | --- |
-| `~/.claude/CLAUDE.md`, the files it `@imports`, and `~/.claude/rules/**/*.md` | `~/.codex/AGENTS.md` |
-| `CLAUDE.md`, `.claude/CLAUDE.md`, `.claude/rules/**/*.md` and `CLAUDE.local.md` in a folder, plus their imports | `AGENTS.md` in that folder, kept out of git |
+| only `CLAUDE.md` | copies it to `AGENTS.md`, with `@imports` resolved, since Codex cannot follow them |
+| only `AGENTS.md` | copies it to `CLAUDE.md` |
+| the same text, or a `CLAUDE.md` that is just `@AGENTS.md`, or a symlink between them | nothing |
+| both, and only one changed since the last sync | copies the changed one over the other |
+| both, and they differ in a way only a reader can settle | **merges them with a coding agent** (Claude Code or Codex, headless), using git history and the repository's default branch as evidence, without asking you |
 
-It has no dependencies: about 1,100 lines of standard-library Python.
+The last case covers files that have drifted apart, files both sides edited since the last
+sync, and the first time the tool sees a pair that differs. After a merge, both files
+match, or CLAUDE.md becomes `@AGENTS.md` if that is the repository's convention. The next
+change on one side is then copied without another merge.
+
+The same rules apply to your global pair: `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md`.
+
+It is about 1,700 lines of standard-library Python with no dependencies. It runs on Linux
+and macOS.
 
 ## Install
 
-Python 3.11 or newer. Works on Linux and macOS.
+Python 3.11 or newer. A merge needs [Claude Code](https://code.claude.com) or
+[Codex](https://github.com/openai/codex) installed and signed in.
 
 ```sh
 uv tool install git+https://github.com/tjazerzen/claude-md-for-codex
 # or: pipx install git+https://github.com/tjazerzen/claude-md-for-codex
 
-claude-md-for-codex install --root ~/code
+claude-md-for-codex status --root ~/code       # look first: what would happen where
+claude-md-for-codex install --root ~/code      # then sync now and on a schedule
 ```
 
 `install` does three things:
 
-1. Saves the settings in `~/.config/claude-md-for-codex/config.toml`: the folders to
-   search for projects, here `~/code`, and how often to sync.
+1. Saves the settings in `~/.config/claude-md-for-codex/config.toml`.
 2. Syncs once.
 3. Schedules later syncs:
-   - **Linux:** a systemd user timer, plus a `.path` unit that syncs again the moment
-     `~/.claude/CLAUDE.md` or `~/.claude/rules/` changes.
-   - **macOS:** a launchd agent with `WatchPaths` that does the same.
+   - **Linux:** a systemd user timer, plus a `.path` unit that syncs as soon as
+     `~/.claude/CLAUDE.md` or `~/.codex/AGENTS.md` changes.
+   - **macOS:** a launchd agent that does the same with `WatchPaths`.
    - **Elsewhere:** a crontab entry (`--scheduler cron`).
 
-The default interval is one hour; change it with `--every 15m`, `--every daily` and so on.
-A sync of a folder with a hundred repositories takes well under a second, so a short
-interval costs nothing.
+The default interval is one hour (`--every 15m`, `--every daily`, ...). Checking a folder of
+a hundred repositories takes under a second; only merges take time, about 20 seconds each.
 
-Without `--root`, only the global file is synced.
+## The analysis
+
+`status` changes nothing. It says what `sync` would do and why:
+
+```text
+$ claude-md-for-codex status --root ~/code
+global   ~/.claude/CLAUDE.md + ~/.codex/AGENTS.md: only CLAUDE.md -> copy CLAUDE.md -> AGENTS.md
+project  ~/code/api: only AGENTS.md -> copy AGENTS.md -> CLAUDE.md
+project  ~/code/web: CLAUDE.md changed since the last sync -> copy CLAUDE.md over AGENTS.md
+project  ~/code/old-branch: they differ and were never synced -> merge with a coding agent
+
+41 pairs checked: 37 nothing to do, 2 copy ..., 1 ..., 1 merge with a coding agent
+```
+
+- `--all` also lists the pairs that are in sync.
+- `--json` gives machine-readable output.
+- The exit code is 1 when `sync` has work to do.
+
+## How a merge works
+
+The tool collects the evidence itself and gives it to the agent:
+
+- **The texts:** both files, and how much of them is identical.
+- **Each file's git history:**
+  - the last commits that changed it, with dates, authors and messages;
+  - how many commits touched it and when it was added;
+  - whether it has uncommitted edits;
+  - its modification time.
+- **The default branch (for example `origin/main`):**
+  - whether this checkout is already merged into it, and how far behind it is;
+  - what both files look like there, for example "on origin/main, CLAUDE.md is only the
+    line `@AGENTS.md`".
+- **The last sync:** what changed since then.
+
+The agent is told the rules:
+
+- Keep every instruction that is still valid.
+- When the files contradict each other, the version the evidence shows is current wins.
+- An outdated earlier version loses to the newer file.
+- Never invent instructions.
+
+It answers in a fixed format:
+
+```text
+DECISION: merged - AGENTS.md is the maintained superset, so it is the base; the still-valid
+reading pointers from CLAUDE.md were added.
+CLAUDE_MD: import
+<<<MERGED
+...the merged file...
+MERGED>>>
+```
+
+`CLAUDE_MD: import` means "write the merged text to AGENTS.md and make CLAUDE.md the single
+line `@AGENTS.md`". The agent chooses it when that is the repository's convention.
+`CLAUDE_MD: copy` writes the merged text to both files.
+
+What keeps a merge safe:
+
+- **The agent cannot touch anything.** It runs with no tools at all: `claude -p --tools ""`
+  without hooks, MCP servers or saved sessions, or `codex exec` in a read-only sandbox.
+  The tool writes the files itself.
+- **Every overwritten file is backed up first**, in
+  `~/.local/state/claude-md-for-codex/backups/`, and kept for 30 days.
+- **Every merge is recorded**, with the prompt's decision and the full answer, in
+  `~/.local/state/claude-md-for-codex/merges/`.
+- **Bad answers are rejected.** An answer in the wrong format, one with conflict markers,
+  or one far shorter than the inputs changes nothing. A pair that failed is not retried for
+  a day.
+- **Identical pairs are merged once.** Pairs with the same two texts (other checkouts or
+  worktrees of one repository) reuse the first result.
+- **At most 5 merges per run** by default (`--max-merges`, or `max_merges` in the config).
+  `--no-merge` copies only.
+
+Choose the agent with `--merger` or `merger` in the config:
+
+- `auto` (the default) uses Claude Code if installed, otherwise Codex.
+- `claude` or `codex` picks one.
+- Any other value is a command that reads the prompt on stdin and prints the answer.
+
+`--model sonnet` (or `model` in the config) picks the model.
+
+## Other rules it follows
+
+- **New files stay local.** A file the tool creates inside a git repository is listed in
+  that repository's `.git/info/exclude`: a per-clone ignore list that is never committed.
+  The new file never shows up in `git status` and is never committed by accident. Linked
+  worktrees share the main checkout's exclude file. If you do want to commit it, run
+  `git add -f`.
+- **Existing files are edited in place.** If both files are tracked by git, a copy or a
+  merge leaves an ordinary uncommitted change for you to commit or discard.
+- **It never runs into a git operation.** A repository in the middle of a merge, rebase,
+  cherry-pick or revert is skipped, and so is any file with conflict markers.
+- **Symlinks keep working.** Writes go to the symlink's target. A symlink from one file to
+  the other counts as in sync.
+- **Project imports stay inside the project.** When the tool copies a CLAUDE.md for Codex,
+  imports that leave the repository are skipped, as Claude Code asks before following them.
+  This way a cloned repository cannot copy `@~/.ssh/config` into a file. Pass
+  `--allow-external-imports` to include them. Your global CLAUDE.md may import anything.
+- **Searching skips the noise.** The search ignores dot-folders, `node_modules`, `vendor`,
+  `venv`, `target`, `dist` and `__pycache__`, and never treats your home folder as a project.
+
+## How imports are resolved
+
+A CLAUDE.md can pull other files in with `@path`; Codex reads `@path` as plain text. When
+CLAUDE.md has imports, the AGENTS.md copy is the CLAUDE.md text followed by each imported
+file, each after a `<!-- claude-md-for-codex: imported from docs/rules.md -->` line.
+
+This follows Claude Code's
+[import rules](https://code.claude.com/docs/en/memory#import-additional-files):
+
+- `@path` counts at the start of a line or after a space, so `user@example.com` is not an
+  import.
+- It is ignored inside inline code and code blocks, when quoted, and when it is a mention
+  like `@alice` that names no file.
+- A relative path resolves against the importing file's folder; `~/` means your home.
+- Imports nest up to four hops, and each file is included once.
+
+If Codex edits such an AGENTS.md, the merge folds the edit back into CLAUDE.md and keeps the
+`@import` lines.
 
 ## Commands
 
 ```text
-claude-md-for-codex status      what Codex sees for each file; exits 1 if a sync is needed
-claude-md-for-codex sync        write the files now (--dry-run to preview, --quiet for timers)
-claude-md-for-codex render [DIR]  print the AGENTS.md that would be generated, without writing
-claude-md-for-codex install     save settings, sync, and schedule (see above)
-claude-md-for-codex uninstall   remove the schedule (--purge: also generated files and settings)
+claude-md-for-codex status [--all] [--json]   the analysis; exit 1 if sync has work to do
+claude-md-for-codex sync [--dry-run]          copy and merge (--no-merge, --max-merges N,
+                                              --merger, --model, --quiet for timers)
+claude-md-for-codex render [DIR]              print the AGENTS.md text Codex gets for a CLAUDE.md
+claude-md-for-codex install                   save settings, sync, schedule
+claude-md-for-codex uninstall [--purge]       remove the schedule; --purge also deletes the files
+                                              it created that you have not edited since
 ```
 
-`sync` and `status` take `--root DIR` (repeatable) to override the saved folders, and
-`--no-global` to leave `~/.codex/AGENTS.md` out.
-
-Example `status` output:
-
-```text
-global   ~/.codex/AGENTS.md: up to date
-project  ~/code/api/AGENTS.md: up to date
-project  ~/code/web/AGENTS.md: shared (AGENTS.md is the shared source)
-project  ~/code/old/AGENTS.md: DRIFT (Codex reads the hand-written AGENTS.md and misses: CLAUDE.md)
-```
-
-## Rules it follows
-
-- **One way only.** The Claude Code files are the source. Edit those; the generated files
-  are overwritten. Two-way sync needs conflict rules, and nobody wants to debug them.
-- **It never touches a file it did not write.** Every generated file starts with a
-  `claude-md-for-codex:generated` comment. A file without that comment is never changed,
-  moved or deleted. The one exception is `sync --adopt`, described below, which you run
-  yourself.
-- **A hand-written AGENTS.md wins.** In a folder where AGENTS.md already exists, the tool
-  only reports what Codex sees:
-  - `shared` means CLAUDE.md is just `@AGENTS.md` (or a symlink to it), so both tools read
-    the same text.
-  - `DRIFT` means CLAUDE.md, CLAUDE.local.md or a rule file has text that Codex does not see.
-    Merge it by hand.
-- **Generated project files stay out of git.** When it creates `AGENTS.md` inside a
-  repository, it adds the path to that repository's `.git/info/exclude`: a per-clone ignore
-  list that is never committed. It never changes `.gitignore` or `git status`, and the
-  file is never committed. Linked worktrees share the main checkout's exclude file. If the
-  upstream project later adds a real AGENTS.md, `git pull` replaces the local copy (git
-  treats ignored files as disposable), and from then on the tool leaves it alone.
-- **Orphans are cleaned up.** If a folder loses its CLAUDE.md, the tool deletes the
-  generated AGENTS.md there.
-- **Project imports stay inside the project.** Claude Code asks before a project file
-  imports something outside the repository. This tool skips such imports, with a warning,
-  so a cloned repository cannot copy `@~/.ssh/config` into a file. Pass
-  `--allow-external-imports` (or set it in the config) to include them. Your global
-  `~/.claude/CLAUDE.md` may import anything.
-
-## How the conversion works
-
-It follows Claude Code's
-[documented rules](https://code.claude.com/docs/en/memory#import-additional-files):
-
-- **Imports.** An import is `@path` at the start of a line or after whitespace, so
-  `user@example.com` is not one. A relative path resolves against the importing file's
-  folder, and `~/` against your home.
-- **What is not an import.** Anything inside inline code or a fenced code block, a quoted
-  path, and a mention like `@alice` that does not name an existing file.
-- **Depth.** Imports nest up to four hops. Each file is included once, which also breaks
-  cycles.
-- **Order.** As Claude Code shows them: each file, then the files it imports.
-- **Layout.** Every file is preceded by a `<!-- source: path -->` line, so Codex (and you)
-  can see where each instruction came from.
-- **Comments.** Block-level HTML comments (`<!-- ... -->` on their own lines) are removed,
-  as Claude Code removes them.
-- **Load order.** In a project folder: `CLAUDE.md`, `.claude/CLAUDE.md`, the rules, then
-  `CLAUDE.local.md`.
-- **Path-scoped rules.** Codex has no equivalent of a rule with `paths:` frontmatter, so
-  such a rule is kept with a note: *"Claude Code applies these rules only to files matching
-  `src/**/*.ts`. Follow them when you work on those files."*
-- **Searching.** The search skips dot-folders, `node_modules`, `vendor`, `venv`, `target`,
-  `dist` and `__pycache__`, and does not treat your home folder as a project.
-
-### Codex-only instructions
-
-`~/.codex/AGENTS.md` now belongs to the tool. Put instructions meant only for Codex in
-`~/.codex/AGENTS.extra.md`; they are added at the end. Codex itself does not read that
-file, so nothing appears twice.
-
-If you already have a hand-written `~/.codex/AGENTS.md`, `sync` refuses to replace it.
-`claude-md-for-codex sync --adopt` (or `install --adopt`) moves it to `AGENTS.extra.md`
-first. If it is a symlink to your CLAUDE.md, it removes the symlink.
+`status` and `sync` take `--root DIR` (repeatable) to override the saved folders, and
+`--no-global` to leave your global pair alone.
 
 ## Limits worth knowing
 
 - **Size.** Codex reads at most `project_doc_max_bytes` (32 KiB by default) of project
-  instructions. `status` warns when a generated file is larger. Raise the limit in
-  `~/.codex/config.toml` if you need to.
-- **Nested files.** Codex loads AGENTS.md files from the repository root down to the folder
-  it started in. Claude Code loads nested CLAUDE.md files when it touches files in that
-  folder. The generated nested AGENTS.md files are there for Codex to find, but when it reads
-  them is up to Codex.
-- **`AGENTS.override.md` hides AGENTS.md from Codex.** If a folder (or `~/.codex`) has an
-  `AGENTS.override.md`, Codex reads that instead of AGENTS.md. `status` warns about the
-  global one.
-- **Both tools reading AGENTS.md.** If you set Claude Code's *Project instructions* to
-  `claude-md-and-agents-md`, Claude Code also reads the generated AGENTS.md next to your
-  CLAUDE.md and sees everything twice. Leave it at the default,
-  `claude-md-or-agents-md`. The same happens with a folder that has only
-  `.claude/rules/` and no CLAUDE.md anywhere above it.
-- **Not converted:**
-  - Claude Code's auto memory (`~/.claude/projects/*/memory`).
-  - Skills, hooks, MCP servers and settings.
-  - Managed-policy CLAUDE.md files.
+  instructions. `status` warns when an AGENTS.md copy is larger.
+- **`AGENTS.override.md` hides AGENTS.md from Codex.** `status` warns about the global one.
+- **Claude Code can read AGENTS.md too.** Since v2.1.277, Claude Code reads AGENTS.md when
+  there is no CLAUDE.md in the working folder or above it. If you set its *Project
+  instructions* option to `claude-md-and-agents-md`, it reads both and sees copied text
+  twice. Keep the default.
+- **Only CLAUDE.md and AGENTS.md are synced.** `CLAUDE.local.md`, `.claude/rules/`, skills,
+  hooks, MCP servers and Claude Code's auto memory are not.
 
 ## Other ways to do this
 
-Look at these first; for many setups one of them is enough.
+Look at these first; for some setups one of them is enough.
 
 **Built into the tools**
 
-- **Write AGENTS.md and import it.** Keep the text in `AGENTS.md` and make `CLAUDE.md`
-  the single line `@AGENTS.md`. Both tools then read the same file. This is the simplest
-  setup for a repository you control. It does not cover `~/.claude/CLAUDE.md`.
-- **Let Claude Code read AGENTS.md.** From v2.1.277, Claude Code reads `AGENTS.md` when
-  there is no CLAUDE.md in the working folder or above it. See *Project instructions* in `/config`.
+- **Write AGENTS.md and import it.** Keep the text in AGENTS.md and make CLAUDE.md the
+  single line `@AGENTS.md`. This is the simplest setup for a repository you control, and
+  this tool treats it as in sync.
 - **Let Codex read CLAUDE.md.** Add `project_doc_fallback_filenames = ["CLAUDE.md"]` to
-  `~/.codex/config.toml`, and Codex reads CLAUDE.md in folders that have no AGENTS.md.
-  It does not apply to `~/.codex`, follow imports, or read CLAUDE.local.md and rules.
-  It combines fine with this tool.
-- **Symlink.** Make `AGENTS.md` a symlink to `CLAUDE.md`, or the reverse. Imports are
-  still not followed, and Windows needs Developer Mode for symlinks.
-- **Codex `SessionStart` hook.** It could print your CLAUDE.md as extra context at the
-  start of each session. Hook output is capped (`additionalContextLimit`), and you have to
-  trust each hook definition in Codex first.
+  `~/.codex/config.toml`, and Codex reads CLAUDE.md in folders without an AGENTS.md. It does
+  not cover `~/.codex`, follow imports, or reconcile two files that both exist.
+- **Symlink one file to the other.** Imports are still not followed, and Windows needs
+  Developer Mode for symlinks.
 
 **Rule-sync tools**
 
@@ -183,19 +218,19 @@ These are from their READMEs as of November 2026. All are MIT-licensed.
 
 | Tool | How it works | Main difference from this tool |
 | --- | --- | --- |
-| [ruler](https://github.com/intellectronica/ruler) | Generates CLAUDE.md, AGENTS.md and many other agents' files from one `.ruler/` folder per project. | You move your rules into its format, it does not read `~/.claude/CLAUDE.md`, and it does not resolve imports. Best when a whole team targets many agents. |
-| [rulesync](https://github.com/dyoshikawa/rulesync) | Generates many agents' files from a `.rulesync/` source; can `import` an existing CLAUDE.md. | Same: its own source format, run by hand or in CI. |
-| [agentsync](https://github.com/dallay/agentsync) | Generates from `.agents/`, symlinking CLAUDE.md to it. | Project-level only. |
-| [agent-rules-sync](https://pypi.org/project/agent-rules-sync/) | A daemon that syncs `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md` both ways; the newest edit wins. | The closest match. It is two-way, so an edit on either side can replace the other. It does not resolve imports. It also syncs skills, MCP servers and settings. |
+| [ruler](https://github.com/intellectronica/ruler) | Generates CLAUDE.md, AGENTS.md and many other agents' files from one `.ruler/` folder per project. | You move your rules into its format, and it does not read your existing files. Best when a team targets many agents. |
+| [rulesync](https://github.com/dyoshikawa/rulesync) | Generates many agents' files from a `.rulesync/` source and can `import` an existing CLAUDE.md. | Same: its own source format, run by hand or in CI. |
+| [agentsync](https://github.com/dallay/agentsync) | Generates from `.agents/` and symlinks CLAUDE.md to it. | Works on project files only. |
+| [agent-rules-sync](https://pypi.org/project/agent-rules-sync/) | A daemon that syncs `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md` both ways; the newest edit wins. | The closest match, but it works on whole files: the newest file replaces the other, with no merge. It also does not resolve imports. |
 
-This tool exists for one narrow case. You write for Claude Code and want Codex to see
-the same thing, without changing how you write, committing generated files, or risking a
-hand-written AGENTS.md.
+This tool's niche is existing files. It works with the CLAUDE.md and AGENTS.md files you
+already have, wherever they are, and it reconciles them by reading them rather than by
+timestamp.
 
 ## Uninstall
 
 ```sh
-claude-md-for-codex uninstall --purge   # schedule, generated files, exclude lines, settings
+claude-md-for-codex uninstall --purge   # schedule, created files you have not edited, settings
 uv tool uninstall claude-md-for-codex
 ```
 
@@ -205,8 +240,8 @@ uv tool uninstall claude-md-for-codex
 PYTHONPATH=src python3 -m unittest discover -s tests
 ```
 
-The tests build a fake home folder and real git repositories (worktrees included) in a
-temporary folder. They never touch your own files.
+The tests build a fake home folder, real git repositories (worktrees and a remote included)
+and a fake merger in a temporary folder. They never touch your files or call a real agent.
 
 ## License
 
