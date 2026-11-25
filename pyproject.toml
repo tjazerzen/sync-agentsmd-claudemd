@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "claude-md-for-codex"
+version = "0.1.0"
+description = "Let OpenAI Codex read your Claude Code instructions: keeps AGENTS.md copies of CLAUDE.md files, with @imports resolved."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+dependencies = []
+keywords = ["claude-code", "codex", "agents-md", "claude-md", "ai-coding", "sync"]
+classifiers = [
+  "Environment :: Console",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Topic :: Software Development",
+]
+
+[project.urls]
+Homepage = "https://github.com/tjazerzen/claude-md-for-codex"
+Issues = "https://github.com/tjazerzen/claude-md-for-codex/issues"
+
+[project.scripts]
+claude-md-for-codex = "claude_md_for_codex.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/claude_md_for_codex"]
