@@ -473,9 +473,9 @@ def _merge(a: Analysis, state: State, opts: Options) -> str:
             return f"merge failed: {exc}"
         record = {"ok": True, "folder": str(p.folder), "case": a.case, "style": a.style,
                   "decision": result.decision, "reason": result.reason, "content": result.content,
-                  "claude_md": result.claude_md, "answer": result.raw, "merger": opts.merger}
+                  "claude_md": result.claude_md, "answer": result.raw, "merger": m.merger_name(opts.merger)}
         state.save_merge(pair_id, record)
-        source = f"merged with {opts.merger}"
+        source = f"merged with {record['merger']}"
 
     state.backup(p.claude)
     state.backup(p.agents)

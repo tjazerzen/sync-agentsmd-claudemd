@@ -47,6 +47,16 @@ def find_program(name: str) -> str | None:
     return shutil.which(name) or shutil.which(name, path=extra)
 
 
+def merger_name(merger: str) -> str:
+    """What `auto` resolves to (claude or codex), or the custom command's program name."""
+    if merger == "auto":
+        return next((n for n in ("claude", "codex") if find_program(n)), "auto")
+    if merger in ("claude", "codex"):
+        return merger
+    parts = shlex.split(merger)
+    return os.path.basename(parts[0]) if parts else merger
+
+
 def merger_command(merger: str, model: str | None, workdir: Path) -> tuple[list[str], Path | None]:
     """(argv, file the answer is written to or None for stdout)."""
     if merger in ("auto", "claude", "codex"):

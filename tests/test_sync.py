@@ -189,6 +189,7 @@ class MergeTest(Sandbox):
         code, out, _ = self.sync()
         self.assertEqual(code, 0, out)
         self.assertIn("merged - kept both rules", out)
+        self.assertIn(f"merged with {os.path.basename(sys.executable)}: merged", out)
         merged = "# Rules\nmerged rule one\nmerged rule two\n"
         self.assertEqual((repo / "CLAUDE.md").read_text(), merged)
         self.assertEqual((repo / "AGENTS.md").read_text(), merged)
