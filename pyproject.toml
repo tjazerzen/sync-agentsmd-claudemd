@@ -3,9 +3,9 @@ requires = ["hatchling>=1.25"]
 build-backend = "hatchling.build"
 
 [project]
-name = "claude-md-for-codex"
-version = "0.2.0"
-description = "Keep CLAUDE.md (Claude Code) and AGENTS.md (Codex) in step: copies whichever exists to the other and merges them with a coding agent when both changed."
+name = "sync-agentsmd-claudemd"
+version = "0.3.0"
+description = "Keep CLAUDE.md (Claude Code) and AGENTS.md (Codex) in sync both ways: copies whichever exists to the other and merges diverged pairs with a coding agent."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -21,11 +21,11 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/tjazerzen/claude-md-for-codex"
-Issues = "https://github.com/tjazerzen/claude-md-for-codex/issues"
+Homepage = "https://github.com/tjazerzen/sync-agentsmd-claudemd"
+Issues = "https://github.com/tjazerzen/sync-agentsmd-claudemd/issues"
 
 [project.scripts]
-claude-md-for-codex = "claude_md_for_codex.cli:main"
+sync-agentsmd-claudemd = "sync_agentsmd_claudemd.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/claude_md_for_codex"]
+packages = ["src/sync_agentsmd_claudemd"]

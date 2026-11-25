@@ -1,4 +1,4 @@
-# claude-md-for-codex
+# sync-agentsmd-claudemd
 
 Keep `CLAUDE.md` ([Claude Code](https://code.claude.com)) and `AGENTS.md`
 ([OpenAI Codex](https://github.com/openai/codex)) saying the same thing, in every project
@@ -30,16 +30,16 @@ Python 3.11 or newer. A merge needs [Claude Code](https://code.claude.com) or
 [Codex](https://github.com/openai/codex) installed and signed in.
 
 ```sh
-uv tool install git+https://github.com/tjazerzen/claude-md-for-codex
-# or: pipx install git+https://github.com/tjazerzen/claude-md-for-codex
+uv tool install git+https://github.com/tjazerzen/sync-agentsmd-claudemd
+# or: pipx install git+https://github.com/tjazerzen/sync-agentsmd-claudemd
 
-claude-md-for-codex status --root ~/code       # look first: what would happen where
-claude-md-for-codex install --root ~/code      # then sync now and on a schedule
+sync-agentsmd-claudemd status --root ~/code       # look first: what would happen where
+sync-agentsmd-claudemd install --root ~/code      # then sync now and on a schedule
 ```
 
 `install` does three things:
 
-1. Saves the settings in `~/.config/claude-md-for-codex/config.toml`.
+1. Saves the settings in `~/.config/sync-agentsmd-claudemd/config.toml`.
 2. Syncs once.
 3. Schedules later syncs:
    - **Linux:** a systemd user timer, plus a `.path` unit that syncs as soon as
@@ -55,7 +55,7 @@ a hundred repositories takes under a second; only merges take time, about 20 sec
 `status` changes nothing. It says what `sync` would do and why:
 
 ```text
-$ claude-md-for-codex status --root ~/code
+$ sync-agentsmd-claudemd status --root ~/code
 global   ~/.claude/CLAUDE.md + ~/.codex/AGENTS.md: only CLAUDE.md -> copy CLAUDE.md -> AGENTS.md
 project  ~/code/api: only AGENTS.md -> copy AGENTS.md -> CLAUDE.md
 project  ~/code/web: CLAUDE.md changed since the last sync -> copy CLAUDE.md over AGENTS.md
@@ -112,9 +112,9 @@ What keeps a merge safe:
   without hooks, MCP servers or saved sessions, or `codex exec` in a read-only sandbox.
   The tool writes the files itself.
 - **Every overwritten file is backed up first**, in
-  `~/.local/state/claude-md-for-codex/backups/`, and kept for 30 days.
+  `~/.local/state/sync-agentsmd-claudemd/backups/`, and kept for 30 days.
 - **Every merge is recorded**, with the prompt's decision and the full answer, in
-  `~/.local/state/claude-md-for-codex/merges/`.
+  `~/.local/state/sync-agentsmd-claudemd/merges/`.
 - **Bad answers are rejected.** An answer in the wrong format, one with conflict markers,
   or one far shorter than the inputs changes nothing. A pair that failed is not retried for
   a day.
@@ -155,7 +155,7 @@ Choose the agent with `--merger` or `merger` in the config:
 
 A CLAUDE.md can pull other files in with `@path`; Codex reads `@path` as plain text. When
 CLAUDE.md has imports, the AGENTS.md copy is the CLAUDE.md text followed by each imported
-file, each after a `<!-- claude-md-for-codex: imported from docs/rules.md -->` line.
+file, each after a `<!-- sync-agentsmd-claudemd: imported from docs/rules.md -->` line.
 
 This follows Claude Code's
 [import rules](https://code.claude.com/docs/en/memory#import-additional-files):
@@ -173,12 +173,12 @@ If Codex edits such an AGENTS.md, the merge folds the edit back into CLAUDE.md a
 ## Commands
 
 ```text
-claude-md-for-codex status [--all] [--json]   the analysis; exit 1 if sync has work to do
-claude-md-for-codex sync [--dry-run]          copy and merge (--no-merge, --max-merges N,
+sync-agentsmd-claudemd status [--all] [--json]   the analysis; exit 1 if sync has work to do
+sync-agentsmd-claudemd sync [--dry-run]          copy and merge (--no-merge, --max-merges N,
                                               --merger, --model, --quiet for timers)
-claude-md-for-codex render [DIR]              print the AGENTS.md text Codex gets for a CLAUDE.md
-claude-md-for-codex install                   save settings, sync, schedule
-claude-md-for-codex uninstall [--purge]       remove the schedule; --purge also deletes the files
+sync-agentsmd-claudemd render [DIR]              print the AGENTS.md text Codex gets for a CLAUDE.md
+sync-agentsmd-claudemd install                   save settings, sync, schedule
+sync-agentsmd-claudemd uninstall [--purge]       remove the schedule; --purge also deletes the files
                                               it created that you have not edited since
 ```
 
@@ -227,11 +227,25 @@ This tool's niche is existing files. It works with the CLAUDE.md and AGENTS.md f
 already have, wherever they are, and it reconciles them by reading them rather than by
 timestamp.
 
+## Upgrading from claude-md-for-codex
+
+Before 0.3 this tool was called `claude-md-for-codex`. To upgrade:
+
+```sh
+uv tool install git+https://github.com/tjazerzen/sync-agentsmd-claudemd
+sync-agentsmd-claudemd install      # moves the old settings and state, replaces the old timer
+uv tool uninstall claude-md-for-codex
+```
+
+The first run moves `~/.config/claude-md-for-codex` and `~/.local/state/claude-md-for-codex`
+to their new names. `install` removes the old systemd units, launchd agent or crontab entry
+and sets up the new ones.
+
 ## Uninstall
 
 ```sh
-claude-md-for-codex uninstall --purge   # schedule, created files you have not edited, settings
-uv tool uninstall claude-md-for-codex
+sync-agentsmd-claudemd uninstall --purge   # schedule, created files you have not edited, settings
+uv tool uninstall sync-agentsmd-claudemd
 ```
 
 ## Development

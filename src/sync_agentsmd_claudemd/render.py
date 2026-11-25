@@ -11,8 +11,8 @@ import os
 import re
 from pathlib import Path
 
-LEGACY_TAG = "claude-md-for-codex:generated"  # header of files written by version 0.1
-IMPORT_BLOCK = "<!-- claude-md-for-codex: imported from "
+LEGACY_TAG = "claude-md-for-codex:generated"  # header of files written by 0.1, under the old name
+IMPORT_BLOCK = "<!-- sync-agentsmd-claudemd: imported from "
 MAX_IMPORT_HOPS = 4  # "Imported files can recursively import other files, with a maximum depth of four hops."
 
 _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")

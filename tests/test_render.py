@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from claude_md_for_codex import render as r
+from sync_agentsmd_claudemd import render as r
 
 
 class FindImportsTest(unittest.TestCase):

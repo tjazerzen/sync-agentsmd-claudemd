@@ -10,7 +10,7 @@ import tomllib
 from pathlib import Path
 
 from . import __version__, render as r, schedule, sync as s
-from .state import State, digest, run_lock
+from .state import State, digest, migrate_legacy_dirs, run_lock, state_dir
 
 DEFAULT_EVERY = "1h"
 DEFAULT_MAX_DEPTH = 8
@@ -19,7 +19,7 @@ DEFAULT_MAX_MERGES = 5
 
 def config_path() -> Path:
     base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
-    return Path(base) / "claude-md-for-codex" / "config.toml"
+    return Path(base) / "sync-agentsmd-claudemd" / "config.toml"
 
 
 def load_config() -> dict:
@@ -41,7 +41,7 @@ def save_config(cfg: dict) -> Path:
         return '"' + str(v).replace("\\", "\\\\").replace('"', '\\"') + '"'
     path = config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    lines = ["# claude-md-for-codex settings (written by `claude-md-for-codex install`)"]
+    lines = ["# sync-agentsmd-claudemd settings (written by `sync-agentsmd-claudemd install`)"]
     lines += [f"{k} = {toml_value(v)}" for k, v in cfg.items() if v is not None]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
@@ -111,7 +111,7 @@ def cmd_status(args) -> int:
             print("(pairs with nothing to do are hidden; --all shows them)")
         if not load_config().get("roots") and not args.root:
             print("No project folders configured: only the global pair was checked. "
-                  "Add some with `claude-md-for-codex install --root ~/code`.")
+                  "Add some with `sync-agentsmd-claudemd install --root ~/code`.")
     return 1 if any(a.pending for a in plan) else 0
 
 
@@ -241,7 +241,7 @@ def cmd_uninstall(args) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
-        prog="claude-md-for-codex",
+        prog="sync-agentsmd-claudemd",
         description="Keep CLAUDE.md (Claude Code) and AGENTS.md (Codex) in step: copy whichever exists "
                     "to the other, and merge them with a coding agent when both changed.")
     p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
@@ -293,6 +293,8 @@ def main(argv: list[str] | None = None) -> int:
     sp.set_defaults(func=cmd_uninstall)
 
     args = p.parse_args(argv)
+    for note in migrate_legacy_dirs(config_path().parent, state_dir()):
+        print(note, file=sys.stderr)
     try:
         return args.func(args)
     except ValueError as exc:

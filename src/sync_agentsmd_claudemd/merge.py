@@ -79,7 +79,7 @@ def merger_command(merger: str, model: str | None, workdir: Path) -> tuple[list[
 
 
 def run_merger(prompt: str, merger: str = "auto", model: str | None = None, timeout: int = TIMEOUT) -> str:
-    with tempfile.TemporaryDirectory(prefix="claude-md-for-codex-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="sync-agentsmd-claudemd-") as tmp:
         workdir = Path(tmp)
         argv, outfile = merger_command(merger, model, workdir)
         try:
@@ -235,14 +235,14 @@ MERGED>>>
 
 IMPORT_NOTE = """- Lines like `@path/to/file` in CLAUDE.md are imports: Claude Code reads the named file in \
 their place. Keep them as they are. AGENTS.md is generated from CLAUDE.md with each imported file \
-appended after a `<!-- claude-md-for-codex: imported from ... -->` line; leave those blocks out \
+appended after a `<!-- sync-agentsmd-claudemd: imported from ... -->` line; leave those blocks out \
 of your answer, and put any edit made inside them into the CLAUDE.md text instead.
 """
 
 STUB_NOTE = """- CLAUDE.md imports AGENTS.md (`{token}`), so Claude Code reads AGENTS.md plus the rest of \
 CLAUDE.md, while Codex reads only AGENTS.md. Your answer becomes the new AGENTS.md, and CLAUDE.md \
 is reduced to the import line. Fold the rest of CLAUDE.md into it, including any blocks after a \
-`<!-- claude-md-for-codex: imported from ... -->` line (other files CLAUDE.md imports), and do \
+`<!-- sync-agentsmd-claudemd: imported from ... -->` line (other files CLAUDE.md imports), and do \
 not include the import line itself.
 """
 

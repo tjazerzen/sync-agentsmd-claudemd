@@ -9,9 +9,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from claude_md_for_codex import cli
-from claude_md_for_codex import sync as s
-from claude_md_for_codex.state import State
+from sync_agentsmd_claudemd import cli
+from sync_agentsmd_claudemd import sync as s
+from sync_agentsmd_claudemd.state import State
 
 FAKE_MERGER = """
 import os, sys, pathlib
@@ -145,7 +145,7 @@ class CopyTest(Sandbox):
         self.sync()
         self.assertEqual((repo / "CLAUDE.md").read_text(), "v3 from codex\n")
         self.assertEqual(self.merges_run(), 0)
-        backups = list((self.home / ".local/state/claude-md-for-codex/backups").rglob("*.md"))
+        backups = list((self.home / ".local/state/sync-agentsmd-claudemd/backups").rglob("*.md"))
         self.assertEqual(len(backups), 2)
 
     def test_writes_go_through_symlinks(self):
@@ -198,7 +198,7 @@ class MergeTest(Sandbox):
         self.assertIn("claude rule", prompt)
         self.assertIn("agents rule", prompt)
         self.assertEqual(self.case(repo), ("same", "none"))
-        records = list((self.home / ".local/state/claude-md-for-codex/merges").glob("*.json"))
+        records = list((self.home / ".local/state/sync-agentsmd-claudemd/merges").glob("*.json"))
         self.assertTrue(json.loads(records[0].read_text())["ok"])
 
     def test_merger_can_make_claude_md_import_agents_md_like_the_default_branch(self):
@@ -412,6 +412,23 @@ class CliTest(Sandbox):
         self.run_cli("sync", "--no-global")
         self.assertEqual(self.merges_run(), 1)
 
+    def test_settings_and_state_under_the_old_name_are_moved(self):
+        old_cfg = self.write(self.home / ".config/claude-md-for-codex/config.toml", 'roots = ["/x"]\n')
+        self.write(self.home / ".local/state/claude-md-for-codex/state.json", '{"pairs": {"k": {}}}')
+        _, _, err = self.run_cli("status", "--no-global")
+        self.assertIn("moved", err)
+        self.assertFalse(old_cfg.exists())
+        self.assertEqual(cli.load_config()["roots"], ["/x"])
+        self.assertIn("k", State().data["pairs"])
+
+    def test_purge_also_removes_exclude_lines_written_under_the_old_name(self):
+        repo = self.repo("old-exclude")
+        self.write(repo / "AGENTS.md", "x")
+        exclude = repo / ".git/info/exclude"
+        exclude.write_text("keep\n# claude-md-for-codex: local copy of CLAUDE.md / AGENTS.md\n/AGENTS.md\n")
+        s.git_unexclude(repo / "AGENTS.md")
+        self.assertEqual(exclude.read_text(), "keep\n")
+
     def test_codex_max_bytes_from_codex_config(self):
         self.write(self.env.codex_home / "config.toml", "project_doc_max_bytes = 65536\n")
         self.assertEqual(cli.codex_max_bytes(s.Env.from_os()), 65536)
@@ -424,7 +441,7 @@ class CliTest(Sandbox):
         cli.save_config({"roots": [str(self.code)]})
         self.run_cli("sync", "--no-global")
         (b / "CLAUDE.md").write_text("edited by hand")
-        with mock.patch("claude_md_for_codex.schedule.uninstall", return_value=[]):
+        with mock.patch("sync_agentsmd_claudemd.schedule.uninstall", return_value=[]):
             _, out, _ = self.run_cli("uninstall", "--purge")
         self.assertFalse((a / "AGENTS.md").exists())
         self.assertNotIn("/AGENTS.md", (a / ".git/info/exclude").read_text())

@@ -1,4 +1,4 @@
-"""Run `claude-md-for-codex sync` on a schedule: systemd user timer, launchd agent or cron.
+"""Run `sync-agentsmd-claudemd sync` on a schedule: systemd user timer, launchd agent or cron.
 
 Each scheduler also re-runs the sync as soon as ~/.claude/CLAUDE.md changes where it can
 (a systemd .path unit, launchd WatchPaths), so the timer only has to catch the project
@@ -16,9 +16,13 @@ import subprocess
 import sys
 from pathlib import Path
 
-NAME = "claude-md-for-codex"
-LAUNCHD_LABEL = "io.github.tjazerzen.claude-md-for-codex"
+NAME = "sync-agentsmd-claudemd"
+LAUNCHD_LABEL = "io.github.tjazerzen.sync-agentsmd-claudemd"
 CRON_TAG = f"# {NAME} (managed; remove with `{NAME} uninstall`)"
+# Before 0.3 the tool was called claude-md-for-codex; uninstall removes its entries too.
+LEGACY_NAME = "claude-md-for-codex"
+LEGACY_LAUNCHD_LABEL = "io.github.tjazerzen.claude-md-for-codex"
+LEGACY_CRON_TAG = f"# {LEGACY_NAME} (managed; remove with `{LEGACY_NAME} uninstall`)"
 PASSED_ENV = ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "XDG_CONFIG_HOME")
 
 
@@ -43,7 +47,7 @@ def command() -> list[str]:
     exe = shutil.which(NAME)
     if exe:
         return [exe]
-    return [sys.executable, "-m", "claude_md_for_codex"]
+    return [sys.executable, "-m", "sync_agentsmd_claudemd"]
 
 
 def detect() -> str:
@@ -72,7 +76,7 @@ def systemd_units(cmd: list[str], every: int, watch: list[Path], env: dict[str, 
     env_lines = "".join(f"Environment={_systemd_quote(f'{k}={v}')}\n" for k, v in env.items())
     service = (
         "[Unit]\n"
-        "Description=Keep CLAUDE.md and AGENTS.md in step (claude-md-for-codex)\n\n"
+        "Description=Keep CLAUDE.md and AGENTS.md in step (sync-agentsmd-claudemd)\n\n"
         "[Service]\n"
         "Type=oneshot\n"
         f"{env_lines}"
@@ -129,14 +133,18 @@ def install_systemd(cmd: list[str], every: int, watch: list[Path]) -> list[str]:
 
 def uninstall_systemd() -> list[str]:
     unit_dir = _systemd_dir()
-    names = [f"{NAME}.timer", f"{NAME}.path", f"{NAME}.service"]
-    if not any((unit_dir / n).exists() for n in names):
-        return []
-    subprocess.run(["systemctl", "--user", "disable", "--now", *names[:2]], capture_output=True)
-    for n in names:
-        (unit_dir / n).unlink(missing_ok=True)
-    subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
-    return [f"removed systemd units from {unit_dir}"]
+    notes = []
+    for name in (NAME, LEGACY_NAME):
+        names = [f"{name}.timer", f"{name}.path", f"{name}.service"]
+        if not any((unit_dir / n).exists() for n in names):
+            continue
+        subprocess.run(["systemctl", "--user", "disable", "--now", *names[:2]], capture_output=True)
+        for n in names:
+            (unit_dir / n).unlink(missing_ok=True)
+        notes.append(f"removed the {name} systemd units from {unit_dir}")
+    if notes:
+        subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
+    return notes
 
 
 # ---------------------------------------------------------------- launchd
@@ -158,8 +166,8 @@ def launchd_plist(cmd: list[str], every: int, watch: list[Path], env: dict[str, 
     return plistlib.dumps(spec)
 
 
-def _plist_path() -> Path:
-    return Path.home() / "Library" / "LaunchAgents" / f"{LAUNCHD_LABEL}.plist"
+def _plist_path(label: str = LAUNCHD_LABEL) -> Path:
+    return Path.home() / "Library" / "LaunchAgents" / f"{label}.plist"
 
 
 def install_launchd(cmd: list[str], every: int, watch: list[Path]) -> list[str]:
@@ -175,12 +183,14 @@ def install_launchd(cmd: list[str], every: int, watch: list[Path]) -> list[str]:
 
 
 def uninstall_launchd() -> list[str]:
-    plist = _plist_path()
-    if not plist.exists():
-        return []
-    subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}", str(plist)], capture_output=True)
-    plist.unlink()
-    return [f"removed {plist}"]
+    notes = []
+    for label in (LAUNCHD_LABEL, LEGACY_LAUNCHD_LABEL):
+        plist = _plist_path(label)
+        if plist.exists():
+            subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}", str(plist)], capture_output=True)
+            plist.unlink()
+            notes.append(f"removed {plist}")
+    return notes
 
 
 # ---------------------------------------------------------------- cron
@@ -218,7 +228,7 @@ def uninstall_cron() -> list[str]:
     if not shutil.which("crontab"):
         return []
     current = _crontab()
-    kept = [ln for ln in current.splitlines() if CRON_TAG not in ln]
+    kept = [ln for ln in current.splitlines() if CRON_TAG not in ln and LEGACY_CRON_TAG not in ln]
     if kept == current.splitlines():
         return []
     _set_crontab("\n".join(kept) + "\n" if kept else "")

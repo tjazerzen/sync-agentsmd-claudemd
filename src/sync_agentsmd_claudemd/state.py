@@ -1,6 +1,6 @@
 """What the last sync saw, merge results, backups and the run lock.
 
-Everything lives in $XDG_STATE_HOME/claude-md-for-codex (default ~/.local/state/...):
+Everything lives in $XDG_STATE_HOME/sync-agentsmd-claudemd (default ~/.local/state/...):
 
   state.json   per pair: hashes of CLAUDE.md, its Codex view and AGENTS.md after the last
                sync (so a later difference shows which side changed); files this tool
@@ -24,9 +24,24 @@ from pathlib import Path
 BACKUP_DAYS = 30
 
 
+LEGACY_NAME = "claude-md-for-codex"  # the tool's name before 0.3
+
+
 def state_dir() -> Path:
     base = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
-    return Path(base) / "claude-md-for-codex"
+    return Path(base) / "sync-agentsmd-claudemd"
+
+
+def migrate_legacy_dirs(*new_dirs: Path) -> list[str]:
+    """Move config and state folders kept under the old name to the new one (once)."""
+    moved = []
+    for new in new_dirs:
+        old = new.with_name(LEGACY_NAME)
+        if old.is_dir() and not new.exists():
+            new.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(old, new)
+            moved.append(f"moved {old} to {new}")
+    return moved
 
 
 def digest(text: str | None) -> str | None:
