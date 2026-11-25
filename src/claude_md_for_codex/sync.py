@@ -134,6 +134,7 @@ def project_sources(folder: Path) -> list[tuple[Path, bool]]:
 def find_folders(root: Path, max_depth: int, home: Path) -> list[Path]:
     """Folders under root that have Claude Code files or an AGENTS.md, skipping dependencies."""
     names = {"CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", ".claude"}
+    home_real = home.resolve()
     out: list[Path] = []
     stack = [(root, 0)]
     while stack:
@@ -142,7 +143,7 @@ def find_folders(root: Path, max_depth: int, home: Path) -> list[Path]:
             entries = list(os.scandir(folder))
         except OSError:
             continue
-        if folder != home and any(e.name in names for e in entries):
+        if any(e.name in names for e in entries) and Path(folder).resolve() != home_real:
             out.append(Path(folder))
         if depth >= max_depth:
             continue
@@ -217,6 +218,13 @@ def _inspect_hand_written(folder: Path, target: Path, col: r.Collection, env: En
 # ---------------------------------------------------------------- apply
 
 
+def _repo_pattern(path: Path, toplevel: str) -> str | None:
+    """`/dir/AGENTS.md` relative to the work tree. git reports real paths, so compare real paths
+    (on macOS /var is a symlink to /private/var; a code folder may be a symlink too)."""
+    rel = os.path.relpath(os.path.realpath(path), os.path.realpath(toplevel)).replace(os.sep, "/")
+    return None if rel.startswith("../") or rel == ".." else "/" + rel
+
+
 def git_exclude(path: Path) -> str | None:
     """List path in its repository's .git/info/exclude. Returns the exclude file it edited."""
     folder = path.parent
@@ -232,8 +240,9 @@ def git_exclude(path: Path) -> str | None:
     except (OSError, subprocess.SubprocessError):
         return None
     common_dir = Path(common) if os.path.isabs(common) else folder / common
-    rel = os.path.relpath(path, top.stdout.strip()).replace(os.sep, "/")
-    pattern = "/" + rel
+    pattern = _repo_pattern(path, top.stdout.strip())
+    if pattern is None:
+        return None
     exclude = common_dir / "info" / "exclude"
     existing = _read(exclude) or ""
     if pattern in existing.splitlines():
@@ -259,7 +268,7 @@ def git_unexclude(path: Path) -> None:
     common_dir = Path(common) if os.path.isabs(common) else folder / common
     exclude = common_dir / "info" / "exclude"
     lines = (_read(exclude) or "").split("\n")
-    pattern = "/" + os.path.relpath(path, toplevel).replace(os.sep, "/")
+    pattern = _repo_pattern(path, toplevel)
     out: list[str] = []
     for i, line in enumerate(lines):
         if line == pattern and i > 0 and lines[i - 1] == EXCLUDE_COMMENT:

@@ -181,10 +181,12 @@ class Collection:
                 return path.relative_to(self.label_base).as_posix()
             except ValueError:
                 pass
-        try:
-            return "~/" + path.relative_to(self.home).as_posix()
-        except ValueError:
-            return str(path)
+        for home in (self.home, self.home.resolve()):
+            try:
+                return "~/" + path.relative_to(home).as_posix()
+            except ValueError:
+                continue
+        return str(path)
 
     def add(self, path: Path, *, rule: bool = False, note: str | None = None) -> None:
         self._visit(path, depth=0, imported_by=None, rule=rule, note=note)

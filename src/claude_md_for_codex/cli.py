@@ -72,10 +72,12 @@ def _plan(args, env: s.Env) -> s.Plan:
 
 
 def _show(env: s.Env, path: Path) -> str:
-    try:
-        return "~/" + path.relative_to(env.home).as_posix()
-    except ValueError:
-        return str(path)
+    for home in (env.home, env.home.resolve()):
+        try:
+            return "~/" + path.relative_to(home).as_posix()
+        except ValueError:
+            continue
+    return str(path)
 
 
 VERBS = {"create": "created", "update": "updated", "remove": "removed"}

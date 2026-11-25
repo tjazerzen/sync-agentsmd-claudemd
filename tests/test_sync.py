@@ -175,6 +175,23 @@ class ProjectTest(Sandbox):
         self.assertIn("/AGENTS.md", (repo / ".git/info/exclude").read_text())
         self.assertNotIn("AGENTS.md", self.git(wt, "status", "--porcelain"))
 
+    def test_symlinked_paths_still_get_a_repo_relative_exclude(self):
+        repo = self.repo("real")
+        self.write(repo / "sub/CLAUDE.md", "rules")
+        link = self.home / "link"
+        link.symlink_to(self.code)
+        for t in s.build_plan(self.env, [link], include_global=False).pending:
+            s.apply(t)
+        self.assertIn("/sub/AGENTS.md", (repo / ".git/info/exclude").read_text().splitlines())
+        self.assertEqual(self.git(repo, "status", "--porcelain", "--untracked-files=all").strip(),
+                         "?? sub/CLAUDE.md")
+
+    def test_home_reached_through_a_symlink_is_not_a_project(self):
+        self.write(self.env.claude_dir / "CLAUDE.md", "global")
+        link = Path(self.tmp.name) / "home-link"
+        link.symlink_to(self.home)
+        self.assertEqual(s.find_folders(link, 8, self.home), [])
+
     def test_shared_source_is_left_alone(self):
         repo = self.repo("shared")
         self.write(repo / "AGENTS.md", "team rules")
