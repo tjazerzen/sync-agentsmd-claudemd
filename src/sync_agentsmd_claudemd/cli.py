@@ -104,8 +104,10 @@ def cmd_status(args) -> int:
                 print(f"         warning: {w}")
         counts: dict[str, int] = {}
         for a in plan:
-            counts[a.action] = counts.get(a.action, 0) + 1
-        summary = ", ".join(f"{n} {s.ACTIONS[k]}" for k, n in sorted(counts.items(), key=lambda kv: -kv[1]))
+            key = "behind" if a.case == "behind" else a.action
+            counts[key] = counts.get(key, 0) + 1
+        labels = {**s.ACTIONS, "behind": "behind their default branch (left alone)"}
+        summary = ", ".join(f"{n} {labels[k]}" for k, n in sorted(counts.items(), key=lambda kv: -kv[1]))
         print(f"\n{len(plan)} pairs checked: {summary}" if plan else "no CLAUDE.md or AGENTS.md files found")
         if not args.all and len(shown) < len(plan):
             print("(pairs with nothing to do are hidden; --all shows them)")
@@ -135,6 +137,8 @@ def cmd_sync(args) -> int:
                 print("another sync is running")
             return 0
         state = State()
+        if not args.dry_run:
+            s.forget_tracked(state)
         plan = _plan(args, env, state)
         opts = _options(args, cfg, env)
         status = 0
@@ -229,6 +233,9 @@ def cmd_uninstall(args) -> int:
                 continue
             if digest(text) != sha:
                 print(f"kept {_show(env, path)}: it was edited after this tool created it")
+                continue
+            if s.tracked(path):
+                print(f"kept {_show(env, path)}: git tracks it now")
                 continue
             path.unlink()
             s.git_unexclude(path)

@@ -362,6 +362,93 @@ class SafetyTest(Sandbox):
         self.assertEqual(s.find_folders(link, 8, self.home), [])
 
 
+class BehindTest(Sandbox):
+    """A checkout that is only behind its default branch gets the fix from a pull, not from us."""
+
+    def stale_checkout(self, upstream_claude: str, upstream_agents: str) -> Path:
+        origin = self.base / "origin.git"
+        self.git(self.base, "init", "-q", "--bare", str(origin))
+        repo = self.repo("main-checkout")
+        self.write(repo / "CLAUDE.md", "# Rules\nold claude rule\n")
+        self.write(repo / "AGENTS.md", "# Rules\nold agents rule\n")
+        self.commit(repo, "two different instruction files")
+        self.git(repo, "branch", "feature")
+        self.write(repo / "CLAUDE.md", upstream_claude)
+        self.write(repo / "AGENTS.md", upstream_agents)
+        self.commit(repo, "fix the instruction files")
+        self.git(repo, "remote", "add", "origin", str(origin))
+        self.git(repo, "push", "-q", "origin", "main")
+        self.git(repo, "fetch", "-q", "origin")
+        wt = self.code / "wt-feature"
+        self.git(repo, "worktree", "add", "-q", str(wt), "feature")
+        return wt
+
+    def test_stale_worktree_is_left_alone_when_the_default_branch_is_in_sync(self):
+        wt = self.stale_checkout("@AGENTS.md\n", "# Rules\nnew rule\n")
+        self.assertEqual(self.case(wt), ("behind", "none"))
+        code, out, err = self.sync()
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(self.merges_run(), 0)
+        self.assertEqual(self.git(wt, "status", "--porcelain"), "")
+        _, out, _ = self.run_cli("status", "--root", str(self.code), "--no-global")
+        self.assertIn("1 behind their default branch (left alone)", out)
+        self.git(wt, "merge", "-q", "origin/main")
+        self.assertEqual(self.case(wt), ("shared", "none"))
+
+    def test_identical_copies_on_the_default_branch_count_as_in_sync(self):
+        wt = self.stale_checkout("# Rules\nnew rule\n", "# Rules\nnew rule\n")
+        self.assertEqual(self.case(wt), ("behind", "none"))
+
+    def test_a_local_edit_is_synced_as_usual(self):
+        wt = self.stale_checkout("@AGENTS.md\n", "# Rules\nnew rule\n")
+        (wt / "CLAUDE.md").write_text("# Rules\nold claude rule\nmy new rule\n")
+        self.assertEqual(self.case(wt), ("unsynced", "merge"))
+
+    def test_merges_as_usual_when_the_default_branch_differs_too(self):
+        wt = self.stale_checkout("# Rules\nclaude v2\n", "# Rules\nagents v2\n")
+        self.assertEqual(self.case(wt), ("unsynced", "merge"))
+
+    def test_untracked_local_copies_are_still_updated(self):
+        wt = self.stale_checkout("@AGENTS.md\n", "# Rules\nnew rule\n")
+        self.write(wt / "sub/CLAUDE.md", "sub v1\n")
+        self.sync()  # creates sub/AGENTS.md as a local, excluded copy
+        (wt / "sub/CLAUDE.md").write_text("sub v2\n")
+        self.assertEqual(self.case(wt / "sub"), ("claude-changed", "update-agents"))
+
+
+class TrackedLaterTest(Sandbox):
+    def test_a_pull_replaces_the_local_copy_and_purge_keeps_the_tracked_file(self):
+        repo = self.repo("pulled")
+        self.write(repo / "sub/CLAUDE.md", "sub rules\n")
+        self.commit(repo, "nested CLAUDE.md")
+        cli.save_config({"roots": [str(self.code)]})
+        self.run_cli("sync", "--no-global")
+        self.assertEqual((repo / "sub/AGENTS.md").read_text(), "sub rules\n")  # local copy, excluded
+        self.git(repo, "checkout", "-q", "-b", "upstream")
+        self.git(repo, "add", "-f", "sub/AGENTS.md")
+        self.write(repo / "sub/CLAUDE.md", "@AGENTS.md\n")
+        self.commit(repo, "commit AGENTS.md, CLAUDE.md imports it")
+        self.git(repo, "checkout", "-q", "main")
+        self.write(repo / "sub/AGENTS.md", "sub rules\n")  # the local copy is back on main
+        self.git(repo, "merge", "-q", "upstream")  # git replaces the ignored copy
+        self.assertEqual(self.git(repo, "status", "--porcelain"), "")
+        with mock.patch("sync_agentsmd_claudemd.schedule.uninstall", return_value=[]):
+            _, out, _ = self.run_cli("uninstall", "--purge")
+        self.assertIn("git tracks it now", out)
+        self.assertTrue((repo / "sub/AGENTS.md").exists())
+        self.assertEqual(self.git(repo, "status", "--porcelain"), "")
+
+    def test_sync_forgets_created_files_once_git_tracks_them(self):
+        repo = self.repo("tracked")
+        self.write(repo / "CLAUDE.md", "rules\n")
+        self.sync()
+        state = State()
+        self.assertIn(str(repo / "AGENTS.md"), state.data["created"])
+        self.git(repo, "add", "-f", "AGENTS.md")
+        self.sync()
+        self.assertNotIn(str(repo / "AGENTS.md"), State().data["created"])
+
+
 class GlobalTest(Sandbox):
     def test_global_claude_md_is_copied_for_codex(self):
         self.write(self.env.claude_dir / "CLAUDE.md", "Be brief.\n@~/notes/style.md\n")

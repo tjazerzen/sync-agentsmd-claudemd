@@ -137,9 +137,16 @@ Choose the agent with `--merger` or `merger` in the config:
   that repository's `.git/info/exclude`: a per-clone ignore list that is never committed.
   The new file never shows up in `git status` and is never committed by accident. Linked
   worktrees share the main checkout's exclude file. If you do want to commit it, run
-  `git add -f`.
+  `git add -f`. When a pull later brings a committed version of the file, git replaces the
+  local copy, and from then on the tool treats it as the repository's file.
 - **Existing files are edited in place.** If both files are tracked by git, a copy or a
   merge leaves an ordinary uncommitted change for you to commit or discard.
+- **A checkout that is only behind is left alone.** Suppose the pair differs in an old
+  worktree, but on the default branch (`origin/main`) it is already in sync, and nothing
+  in this checkout has changed either file since it branched off. Then the fix is a
+  `git pull`, and the tool does not edit the tracked files. `status` counts these pairs as
+  "behind their default branch". Once you edit either file there, the pair is synced as
+  usual.
 - **It never runs into a git operation.** A repository in the middle of a merge, rebase,
   cherry-pick or revert is skipped, and so is any file with conflict markers.
 - **Symlinks keep working.** Writes go to the symlink's target. A symlink from one file to
@@ -244,7 +251,8 @@ and sets up the new ones.
 ## Uninstall
 
 ```sh
-sync-agentsmd-claudemd uninstall --purge   # schedule, created files you have not edited, settings
+sync-agentsmd-claudemd uninstall --purge   # schedule, created files you have not edited (and git
+                                           # does not track), settings
 uv tool uninstall sync-agentsmd-claudemd
 ```
 
