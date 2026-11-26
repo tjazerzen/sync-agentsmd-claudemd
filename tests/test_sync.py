@@ -442,11 +442,11 @@ class TrackedLaterTest(Sandbox):
         repo = self.repo("tracked")
         self.write(repo / "CLAUDE.md", "rules\n")
         self.sync()
-        state = State()
-        self.assertIn(str(repo / "AGENTS.md"), state.data["created"])
+        agents = str((repo / "AGENTS.md").resolve())  # the tool stores real paths (macOS: /private/var)
+        self.assertIn(agents, State().data["created"])
         self.git(repo, "add", "-f", "AGENTS.md")
         self.sync()
-        self.assertNotIn(str(repo / "AGENTS.md"), State().data["created"])
+        self.assertNotIn(agents, State().data["created"])
 
 
 class GlobalTest(Sandbox):
