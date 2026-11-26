@@ -195,7 +195,10 @@ sync-agentsmd-claudemd uninstall [--purge]       remove the schedule; --purge al
 ## Limits worth knowing
 
 - **Size.** Codex reads at most `project_doc_max_bytes` (32 KiB by default) of project
-  instructions. `status` warns when an AGENTS.md copy is larger.
+  instructions for a folder. That budget covers every AGENTS.md from the repository root
+  down to that folder together, and Codex cuts whatever does not fit. `status` warns when a
+  folder's chain is over the limit. To raise it, set `project_doc_max_bytes` in
+  `~/.codex/config.toml`; a `.codex/config.toml` inside the repository does not change it.
 - **`AGENTS.override.md` hides AGENTS.md from Codex.** `status` warns about the global one.
 - **Claude Code can read AGENTS.md too.** Since v2.1.277, Claude Code reads AGENTS.md when
   there is no CLAUDE.md in the working folder or above it. If you set its *Project

@@ -95,7 +95,7 @@ def cmd_status(args) -> int:
                  "warnings": a.warnings} for a in plan]
         print(json.dumps(rows, indent=1))
     else:
-        shown = [a for a in plan if a.pending or a.action == "blocked" or args.all]
+        shown = [a for a in plan if a.pending or a.action == "blocked" or a.warnings or args.all]
         for a in shown:
             what = a.detail or s.CASES[a.case]
             arrow = f" -> {s.ACTIONS[a.action]}" if a.action != "none" else ""

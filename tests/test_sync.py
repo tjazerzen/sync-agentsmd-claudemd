@@ -516,6 +516,18 @@ class CliTest(Sandbox):
         s.git_unexclude(repo / "AGENTS.md")
         self.assertEqual(exclude.read_text(), "keep\n")
 
+    def test_size_warning_counts_the_agents_md_files_above(self):
+        repo = self.repo("big")
+        self.write(repo / "AGENTS.md", "a" * 20000 + "\n")
+        self.write(repo / "CLAUDE.md", "@AGENTS.md\n")
+        self.write(repo / "sub/CLAUDE.md", "b" * 15000 + "\n")
+        self.commit(repo, "big instruction files")
+        _, out, _ = self.run_cli("status", "--root", str(self.code), "--no-global")
+        self.assertIn("AGENTS.md here and in the folders above come to 35002 bytes", out)
+        self.write(self.env.codex_home / "config.toml", "project_doc_max_bytes = 65536\n")
+        _, out, _ = self.run_cli("status", "--root", str(self.code), "--no-global")
+        self.assertNotIn("project_doc_max_bytes", out)
+
     def test_codex_max_bytes_from_codex_config(self):
         self.write(self.env.codex_home / "config.toml", "project_doc_max_bytes = 65536\n")
         self.assertEqual(cli.codex_max_bytes(s.Env.from_os()), 65536)

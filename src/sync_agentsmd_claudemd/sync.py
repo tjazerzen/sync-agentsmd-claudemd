@@ -307,11 +307,33 @@ def check_behind(a: Analysis, home: Path) -> None:
     a.detail = f"they differ here but match on {branch}, and this checkout has not changed them: pull to update"
 
 
+def codex_chain_bytes(folder: Path, own: str) -> int:
+    """Bytes of AGENTS.md text Codex reads for folder: one file per folder from the project
+    root down (AGENTS.override.md wins over AGENTS.md), with own as this folder's file."""
+    root = _project_root(folder)
+    total = len(own.encode())
+    for d in folder.parents:
+        if root != folder and (d == root or root in d.parents):
+            text = _read(d / "AGENTS.override.md")
+            if not (text or "").strip():
+                text = _read(d / "AGENTS.md")
+            total += len((text or "").encode())
+    return total
+
+
 def max_bytes_warning(a: Analysis, max_bytes: int) -> None:
-    text = a.view if a.action in {"create-agents", "update-agents"} else None
-    if a.pair.kind == "project" and text is not None and len(text.encode()) > max_bytes:
-        a.warnings.append(f"AGENTS.md would be {len(text.encode())} bytes, over Codex's "
-                          f"project_doc_max_bytes ({max_bytes}); Codex will cut it off")
+    """Codex reads at most project_doc_max_bytes of AGENTS.md text in total for a folder,
+    counting the files above it, and silently cuts the rest."""
+    text = a.view if a.action in {"create-agents", "update-agents"} else a.agents_text
+    if a.pair.kind != "project" or text is None:
+        return
+    total = codex_chain_bytes(a.pair.folder, text)
+    if total > max_bytes:
+        own = len(text.encode())
+        whose = f"AGENTS.md is {own} bytes" if total == own else \
+            f"AGENTS.md here and in the folders above come to {total} bytes"
+        a.warnings.append(f"{whose}, over Codex's project_doc_max_bytes ({max_bytes}), so Codex cuts "
+                          f"the rest; raise project_doc_max_bytes in ~/.codex/config.toml")
 
 
 def build_plan(env: Env, roots: list[Path], state: State, *, include_global: bool = True, max_depth: int = 8,

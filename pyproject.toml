@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "sync-agentsmd-claudemd"
-version = "0.4.0"
+version = "0.4.1"
 description = "Keep CLAUDE.md (Claude Code) and AGENTS.md (Codex) in sync both ways: copies whichever exists to the other and merges diverged pairs with a coding agent."
 readme = "README.md"
 license = "MIT"
